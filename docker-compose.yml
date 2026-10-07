@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: usageline
+      POSTGRES_PASSWORD: usageline
+      POSTGRES_DB: usageline
+    ports:
+      - "5433:5432"
+    volumes:
+      - usageline_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usageline -d usageline"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://usageline:usageline@db:5432/usageline
+    ports:
+      - "8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  usageline_pgdata:
