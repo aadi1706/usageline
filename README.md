@@ -44,6 +44,17 @@ curl localhost:8081/ready
 
 The cluster is called `usageline` and is exposed on host port 8081. The chart (`helm/usageline`) deploys 2 API replicas with an autoscaler (2 to 5), a dev-only Postgres StatefulSet, and runs database migrations as a Helm hook Job.
 
+## Monitoring and load testing
+
+```bash
+./scripts/monitoring-up.sh   # kube-prometheus-stack in 'monitoring', then enables the API's ServiceMonitor, alerts and dashboard
+kubectl --context kind-usageline -n monitoring port-forward svc/kps-grafana 3000:80   # http://localhost:3000 (admin/admin)
+kubectl --context kind-usageline -n monitoring port-forward svc/kps-kube-prometheus-stack-prometheus 9090:9090
+k6 run loadtest/k6.js        # ramping load against localhost:8081
+```
+
+The API exposes Prometheus metrics at `/metrics`. Alert meanings and what to do about them are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
 ## Run the tests
 
 ```bash
@@ -58,6 +69,7 @@ Tests use in-memory SQLite by default; set `TEST_DATABASE_URL` to run them again
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Liveness check (process is up) |
+| GET | `/metrics` | Prometheus metrics |
 | GET | `/ready` | Readiness check (database reachable, else 503) |
 | POST/GET | `/plans` | Create / list plans |
 | POST/GET | `/tenants`, GET `/tenants/{id}` | Create / list / fetch tenants |
