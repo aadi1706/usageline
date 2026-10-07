@@ -31,6 +31,19 @@ curl -X POST localhost:8001/tenants/1/invoices -H 'content-type: application/jso
   -d '{"period_start":"2026-01-01T00:00:00Z","period_end":"2027-01-01T00:00:00Z"}'
 ```
 
+## Run on Kubernetes (kind)
+
+Requires `kind`, `kubectl` and `helm`.
+
+```bash
+./scripts/kind-up.sh      # create cluster, build + load image, install metrics-server and the chart
+curl localhost:8081/health
+curl localhost:8081/ready
+./scripts/kind-down.sh    # delete the cluster
+```
+
+The cluster is called `usageline` and is exposed on host port 8081. The chart (`helm/usageline`) deploys 2 API replicas with an autoscaler (2 to 5), a dev-only Postgres StatefulSet, and runs database migrations as a Helm hook Job.
+
 ## Run the tests
 
 ```bash
@@ -44,7 +57,8 @@ Tests use in-memory SQLite by default; set `TEST_DATABASE_URL` to run them again
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/health` | Liveness check |
+| GET | `/health` | Liveness check (process is up) |
+| GET | `/ready` | Readiness check (database reachable, else 503) |
 | POST/GET | `/plans` | Create / list plans |
 | POST/GET | `/tenants`, GET `/tenants/{id}` | Create / list / fetch tenants |
 | POST/GET | `/tenants/{id}/usage` | Record / list usage events |
