@@ -78,11 +78,26 @@ grafana:
   resources:
     requests: {cpu: 50m, memory: 100Mi}
     limits: {cpu: 300m, memory: 220Mi}
+  # Only the dashboard sidecar runs. The datasource is provisioned directly below, which saves one sidecar
+  # container (an 80Mi limit OOM-killed the sidecars here, so the dashboard one gets 128Mi).
   sidecar:
     resources:
-      requests: {cpu: 10m, memory: 40Mi}
-      limits: {cpu: 100m, memory: 80Mi}
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 100m, memory: 128Mi}
+    datasources:
+      enabled: false
+      defaultDatasourceEnabled: false
     dashboards:
       enabled: true
       label: grafana_dashboard
       searchNamespace: ALL
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          uid: prometheus
+          type: prometheus
+          access: proxy
+          url: http://kps-kube-prometheus-stack-prometheus.monitoring:9090/
+          isDefault: true
