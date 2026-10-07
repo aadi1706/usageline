@@ -2,7 +2,7 @@ import os
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -13,10 +13,18 @@ from app.main import app
 @pytest.fixture()
 def client():
     url = os.getenv("TEST_DATABASE_URL", "sqlite://")
-    kwargs = {"connect_args": {"check_same_thread": False}, "poolclass": StaticPool} if url.startswith("sqlite") else {}
+    is_sqlite = url.startswith("sqlite")
+    kwargs = {"connect_args": {"check_same_thread": False}, "poolclass": StaticPool} if is_sqlite else {}
     engine = create_engine(url, **kwargs)
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+
+    if is_sqlite:
+        Base.metadata.create_all(engine)
+    else:
+        # Schema must come from `alembic upgrade head`, so the migrations are what is under test.
+        tables = ", ".join(Base.metadata.tables)
+        with engine.begin() as conn:
+            conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+
     Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
     def override_get_db():
@@ -29,5 +37,6 @@ def client():
     app.dependency_overrides[get_db] = override_get_db
     yield TestClient(app)
     app.dependency_overrides.clear()
-    Base.metadata.drop_all(engine)
+    if is_sqlite:
+        Base.metadata.drop_all(engine)
     engine.dispose()
