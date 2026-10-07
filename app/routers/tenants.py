@@ -20,7 +20,7 @@ def create_tenant(body: TenantCreate, db: Session = Depends(get_db)):
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(409, "tenant name already exists")
+        raise HTTPException(409, "tenant name already exists") from None
     return tenant
 
 

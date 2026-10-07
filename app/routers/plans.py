@@ -18,7 +18,7 @@ def create_plan(body: PlanCreate, db: Session = Depends(get_db)):
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(409, "plan name already exists")
+        raise HTTPException(409, "plan name already exists") from None
     return plan
 
 
