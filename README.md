@@ -1,5 +1,7 @@
 # Usageline
 
+[![CI](https://github.com/aadi1706/usageline/actions/workflows/ci.yml/badge.svg)](https://github.com/aadi1706/usageline/actions/workflows/ci.yml)
+
 Usageline is a multi-tenant usage-based billing platform. Tenants subscribe to plans (a base fee, a number of included units and a per-unit overage price), report usage events, and an endpoint turns a billing period's usage into an invoice. The app is deliberately small (FastAPI + PostgreSQL); the focus of the project is the infrastructure around it: containers, Kubernetes with kind, Helm, Terraform, GitHub Actions and Prometheus/Grafana, all runnable locally for free.
 
 ## Run it
