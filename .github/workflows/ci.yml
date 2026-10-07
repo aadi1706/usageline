@@ -76,7 +76,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint chart
+      - name: Lint chart (defaults)
         run: helm lint helm/usageline --strict
-      - name: Render chart
-        run: helm template usageline helm/usageline > /dev/null
+      - name: Lint chart (monitoring enabled)
+        run: helm lint helm/usageline --strict -f monitoring/usageline-values.yaml
+      - name: Render chart (monitoring enabled)
+        run: helm template usageline helm/usageline -f monitoring/usageline-values.yaml > /dev/null
+      - name: Render kube-prometheus-stack with our values
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm template kps prometheus-community/kube-prometheus-stack --version 92.1.0 \
+            --namespace monitoring -f monitoring/values.yaml > /dev/null
