@@ -1,0 +1,11 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: usageline
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # kind node port 30080 (the Service's nodePort) -> host port 8081
+      - containerPort: 30080
+        hostPort: 8081
+        listenAddress: "127.0.0.1"
+        protocol: TCP
