@@ -1,0 +1,86 @@
+{{- if .Values.postgres.enabled }}
+# Dev-only database. These are pre-install hooks (not pre-upgrade) so that Postgres exists before the
+# migration Job runs on first install, but is NOT recreated on every upgrade (which would restart the DB).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "usageline.fullname" . }}-postgres
+  labels:
+    {{- include "usageline.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  clusterIP: None
+  selector:
+    {{- include "usageline.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "usageline.fullname" . }}-postgres
+  labels:
+    {{- include "usageline.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  serviceName: {{ include "usageline.fullname" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "usageline.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "usageline.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.config.dbUser | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.config.dbName | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "usageline.secretName" . }}
+                  key: db-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.postgres.storageClassName }}
+        storageClassName: {{ .Values.postgres.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+{{- end }}

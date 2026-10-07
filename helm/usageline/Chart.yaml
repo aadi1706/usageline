@@ -1,0 +1,6 @@
+apiVersion: v2
+name: usageline
+description: Multi-tenant usage-based billing API with an optional dev PostgreSQL
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
