@@ -24,9 +24,10 @@ spec:
       {{- if .Values.postgres.enabled }}
       initContainers:
         # On first install the dev Postgres is created by a hook just before this Job, so wait for it.
+        # -U is required: uid 10001 has no passwd entry, so libpq cannot infer a username.
         - name: wait-for-db
           image: {{ .Values.postgres.image }}
-          command: ["sh", "-c", "until pg_isready -h \"$DB_HOST\" -p \"$DB_PORT\"; do echo waiting for db; sleep 2; done"]
+          command: ["sh", "-c", "until pg_isready -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\" -d \"$DB_NAME\"; do echo waiting for db; sleep 2; done"]
           env:
             {{- include "usageline.env" . | nindent 12 }}
           securityContext:
