@@ -81,3 +81,22 @@ postgres:
     limits:
       cpu: 500m
       memory: 512Mi
+
+# Observability. These need the Prometheus Operator CRDs (installed by monitoring/values.yaml's
+# kube-prometheus-stack), so they default to off. See monitoring/usageline-values.yaml.
+serviceMonitor:
+  enabled: false
+  interval: 15s
+
+prometheusRule:
+  enabled: false
+  # Thresholds are intentionally simple, tune from real traffic.
+  high5xxRatio: 0.05
+  high5xxFor: 2m
+  highLatencyP95Seconds: 0.5
+  highLatencyFor: 5m
+  podsNotReadyFor: 2m
+
+# ConfigMap picked up by the Grafana sidecar (label grafana_dashboard).
+grafanaDashboard:
+  enabled: false

@@ -1,0 +1,51 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- $ns := .Release.Namespace }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "usageline.fullname" . }}
+  labels:
+    {{- include "usageline.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: usageline.rules
+      rules:
+        - alert: UsagelineHigh5xxRate
+          expr: |
+            sum(rate(http_requests_total{namespace="{{ $ns }}", status=~"5.."}[5m]))
+              /
+            sum(rate(http_requests_total{namespace="{{ $ns }}"}[5m]))
+              > {{ .Values.prometheusRule.high5xxRatio }}
+          for: {{ .Values.prometheusRule.high5xxFor }}
+          labels:
+            severity: critical
+          annotations:
+            summary: "More than {{ mulf .Values.prometheusRule.high5xxRatio 100 }}% of API requests are failing with 5xx"
+            description: {{ `5xx ratio is {{ $value | humanizePercentage }} over the last 5m.` | quote }}
+            runbook: docs/RUNBOOK.md#usagelinehigh5xxrate
+        - alert: UsagelineHighLatencyP95
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{namespace="{{ $ns }}", route!~"/health|/ready"}[5m]))
+            ) > {{ .Values.prometheusRule.highLatencyP95Seconds }}
+          for: {{ .Values.prometheusRule.highLatencyFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "API p95 latency is above {{ .Values.prometheusRule.highLatencyP95Seconds }}s"
+            description: {{ `p95 latency is {{ $value | humanizeDuration }} over the last 5m (probes excluded).` | quote }}
+            runbook: docs/RUNBOOK.md#usagelinehighlatencyp95
+        - alert: UsagelinePodsNotReady
+          expr: |
+            sum by (pod) (kube_pod_status_ready{namespace="{{ $ns }}", condition="false"})
+              * on (pod) group_left()
+            sum by (pod) (kube_pod_status_phase{namespace="{{ $ns }}", phase="Running"})
+              > 0
+          for: {{ .Values.prometheusRule.podsNotReadyFor }}
+          labels:
+            severity: critical
+          annotations:
+            summary: "A running pod in {{ $ns }} is not ready"
+            description: {{ `Pod {{ $labels.pod }} has been running but not ready.` | quote }}
+            runbook: docs/RUNBOOK.md#usagelinepodsnotready
+{{- end }}

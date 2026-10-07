@@ -1,0 +1,8 @@
+# Extra chart values that need the Prometheus Operator CRDs. Applied by scripts/monitoring-up.sh
+# and by scripts/kind-up.sh when the CRDs exist.
+serviceMonitor:
+  enabled: true
+prometheusRule:
+  enabled: true
+grafanaDashboard:
+  enabled: true
