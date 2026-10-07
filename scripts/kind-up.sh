@@ -39,9 +39,17 @@ if ! kubectl --context "$CONTEXT" -n kube-system get deploy metrics-server \
 fi
 kubectl --context "$CONTEXT" -n kube-system rollout status deployment/metrics-server --timeout=120s
 
+# ServiceMonitor/PrometheusRule need the Prometheus Operator CRDs; only enable them once monitoring-up.sh installed them.
+EXTRA_VALUES=()
+if kubectl --context "$CONTEXT" get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then
+  echo "==> Prometheus Operator CRDs found, enabling ServiceMonitor, alerts and dashboard"
+  EXTRA_VALUES=(-f "$ROOT/monitoring/usageline-values.yaml")
+fi
+
 echo "==> helm upgrade --install"
 helm upgrade --install usageline "$ROOT/helm/usageline" \
   --kube-context "$CONTEXT" \
+  ${EXTRA_VALUES[@]+"${EXTRA_VALUES[@]}"} \
   --namespace "$NAMESPACE" --create-namespace \
   --set image.tag="$TAG" \
   --wait --timeout 300s
