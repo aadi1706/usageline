@@ -1,0 +1,88 @@
+# kube-prometheus-stack tuned for a laptop kind cluster whose Docker VM has ~4 GB shared with other containers.
+# Local/dev only: no persistence, default Grafana password, short retention.
+
+# We ship our own alerts (helm/usageline); the ~100 built-in rule groups cost memory and add noise here.
+defaultRules:
+  create: false
+
+# Exporters/scrapers that are not needed (or not reachable) on a single-node kind cluster.
+nodeExporter:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeApiServer:
+  enabled: false
+coreDns:
+  enabled: false
+kubeDns:
+  enabled: false
+
+# Kept on purpose: kubelet exposes cAdvisor (container CPU/memory) used by the dashboard.
+kubelet:
+  enabled: true
+  serviceMonitor:
+    probes: false
+    resource: false
+
+prometheusOperator:
+  admissionWebhooks:
+    enabled: false
+  tls:
+    enabled: false
+  resources:
+    requests: {cpu: 20m, memory: 48Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+
+prometheus:
+  prometheusSpec:
+    retention: 6h
+    retentionSize: 400MB
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    # No storage spec => data lives in an emptyDir and is lost when the pod restarts.
+    # Discover ServiceMonitors/PrometheusRules from any namespace (not only those labelled with this release).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    resources:
+      requests: {cpu: 100m, memory: 300Mi}
+      limits: {cpu: 800m, memory: 600Mi}
+
+# Kept: with a ~30 MB footprint it fits the budget, and it lets alerts be routed/inspected like production.
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    retention: 6h
+    resources:
+      requests: {cpu: 10m, memory: 24Mi}
+      limits: {cpu: 100m, memory: 64Mi}
+
+kube-state-metrics:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 96Mi}
+
+grafana:
+  adminPassword: admin  # local only
+  defaultDashboardsEnabled: false  # only our own dashboard; the stock ones are heavy and unneeded here
+  persistence:
+    enabled: false
+  resources:
+    requests: {cpu: 50m, memory: 100Mi}
+    limits: {cpu: 300m, memory: 220Mi}
+  sidecar:
+    resources:
+      requests: {cpu: 10m, memory: 40Mi}
+      limits: {cpu: 100m, memory: 80Mi}
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
