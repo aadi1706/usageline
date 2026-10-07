@@ -513,3 +513,24 @@ Measured in a single run on this laptop. These numbers describe this setup only.
 1. What belongs in a runbook entry for an alert, and why link it from the alert itself?
 2. Why pin the version of a third-party Helm chart?
 3. What can `helm template` catch in CI, and what only shows up when you install on a real cluster?
+
+## 30. Follow-up: Grafana OOMKilled again, and a Helm/HPA conflict
+
+**Finding.** While viewing the dashboard through a port-forward, the Grafana pod restarted twice. `kubectl describe pod` and the container statuses showed the restarting container was the main **`grafana`** container (limit 384 Mi, last state `OOMKilled`, exit code 137), not the `grafana-sc-dashboard` sidecar (0 restarts). At that moment `kubectl top` showed Grafana at about 274 Mi and the sidecar at 81 Mi, so the 384 Mi limit was only about 110 Mi above its idle usage, and a burst while rendering a dashboard was enough to cross it. This is the same failure as in section 23, and it shows that my previous fix (220 Mi to 384 Mi) was sized from a single reading rather than from behaviour while someone actually uses the dashboard.
+
+**Change.** In `monitoring/values.yaml` the Grafana container now has a 512 Mi limit and a 192 Mi request (the sidecar stays at 128 Mi). Headroom: the Docker VM has 3.83 GiB; the kind node was using about 2.5 GiB, so roughly 1.3 GiB was spare while the other two containers on this machine were stopped, and about 0.6 GiB if they run again (they used about 0.7 GiB earlier). Raising the limit by 128 Mi fits either way, but it is a ceiling for spikes, not a prediction that Grafana will use that much.
+
+**What I observed afterwards.** After redeploying with `scripts/monitoring-up.sh`, I simulated a person keeping the dashboard open: every 10 seconds (the dashboard's own refresh interval) a script loaded the dashboard definition and ran all 12 panel queries through Grafana's API, for about 3 minutes (18 refreshes, 12 of 12 panels returned data every time).
+- Restart count stayed at **0** for both containers; the pod was 5 minutes old at the last check and the last state of both containers was empty.
+- Grafana's memory was **not flat**: 249 Mi at the start, 301 Mi at about 45 s, 325 Mi at about 110 s and 339 Mi at about 3 minutes (345 Mi at the final check). That is under the 512 Mi limit, but it was still creeping up when I stopped, so 3 minutes does not show that it plateaus.
+
+**Limits of this check.** The simulation used API calls, not a browser, so it exercises Grafana's server side (which is what the memory limit applies to) but not a person's browser session with its own panel rendering and variable changes. A longer soak, or watching memory over an hour, is the real test. If it keeps growing, the next steps would be to look at Grafana's own metrics or reduce what it caches, rather than raising the limit again.
+
+**A second problem found during the redeploy.** `monitoring-up.sh` failed at its second step with a Helm 4 error: a *server-side apply conflict* on the Deployment's `.spec.replicas`. Helm now uses Kubernetes server-side apply, which tracks which controller owns each field. Our chart sets `replicas` in the Deployment, but the HPA (via the controller manager) also changes it, so after the HPA scaled to 5 a later `helm upgrade` was rejected rather than silently overwriting it. I added `--force-conflicts` to the `helm upgrade --install` in `scripts/kind-up.sh`, which lets Helm take the field back. This is a trade-off, not a clean fix: it resets the replica count to the chart's value on every upgrade, so an upgrade during a traffic peak briefly drops replicas until the HPA scales up again. The conventional fix is to leave `replicas` out of the Deployment when an HPA is enabled; I did not do that here because I have not tested a fresh install without it (the HPA needs working metrics to act).
+
+Side observation: after the load test and the redeploys, the HPA was back down to 3 replicas at 7% CPU on its way to 2. So I did eventually observe scale-down, but only partially (5 to 3, not yet at the minimum of 2); the first "ScaleDownStabilized" condition in its description shows the default stabilisation window delaying it.
+
+**Interview questions**
+1. Exit code 137 and `OOMKilled`: what does each tell you, and how do you tell which container in a multi-container pod was killed?
+2. How would you choose a memory limit for a service like Grafana whose usage depends on what people do with it? What would you monitor?
+3. Why can `helm upgrade` conflict with an HPA over `spec.replicas`, and what are two ways to resolve it?
