@@ -213,3 +213,151 @@ CI means a machine automatically checks every change you push. Our workflow is `
 1. Why set `permissions: contents: read` on a workflow, and what is the risk of the default?
 2. What is the difference between pinning an action to `@v4` and pinning to a commit SHA?
 3. Why run the three jobs in parallel instead of one after another, and when would you make one job depend on another with `needs`?
+
+---
+
+# Phase 3: Kubernetes and Helm (local, with kind)
+
+Kubernetes (K8s) is a system that runs containers for you and keeps them in the state you declared. You write YAML describing what you want ("2 copies of this container, healthy"), and K8s continuously works to make reality match. Helm is a package manager for K8s: it turns YAML templates plus a `values.yaml` file into the final manifests. kind ("Kubernetes in Docker") runs a real cluster inside a Docker container, so it is free and local.
+
+## 13. Readiness vs liveness: `/ready` next to `/health`
+
+**What it is.** `/health` (liveness) says "the process is alive". `/ready` (readiness) runs `SELECT 1` against the database and returns 503 if that fails. Kubernetes uses them differently:
+- A failing **liveness** probe makes K8s *restart* the container.
+- A failing **readiness** probe makes K8s *stop sending traffic* to that pod (it is removed from the Service) but leaves it running.
+
+**Why two.** If the database has a short outage and we only had one check that touched the DB, K8s would restart every API pod for a problem that restarting cannot fix. Keeping liveness DB-free avoids that, while readiness protects users from being routed to pods that cannot do their job. Tests cover both: `/ready` returns 200 normally and 503 when the DB session raises, and `/health` stays 200 even then.
+
+**Limits.** `/ready` checks only the database. It does not check that migrations have run (the migration Job handles that ordering), and a slow DB could make the probe time out, which also marks the pod not-ready.
+
+**Interview questions**
+1. What happens to a pod when its readiness probe fails vs its liveness probe?
+2. Why shouldn't a liveness probe depend on a database?
+3. What are startup probes for, and when would you add one?
+
+## 14. kind and the host port mapping
+
+**What it is.** `kind/cluster.yaml` defines a one-node cluster. `extraPortMappings` forwards host port 8081 (bound to 127.0.0.1 only) to port 30080 on the node. The Service is of type `NodePort` with `nodePort: 30080`, so traffic goes: `localhost:8081` -> kind node:30080 -> Service -> a ready API pod.
+
+**Why.** We needed a way to reach the app from the laptop without an Ingress controller (more moving parts). NodePort plus a port mapping is the simplest working path. The port was chosen because 8000, 6333, 8001 and 5433 were already in use. The scripts target the cluster by name (`--name usageline`, `--context kind-usageline`), so they cannot touch other clusters or any existing Docker containers.
+
+**Limits.** NodePort is a dev convenience. A real cluster would use a LoadBalancer Service or an Ingress with TLS. Binding to 127.0.0.1 means other machines cannot reach it, which is intended here. The node port in `values.yaml` and the kind file must be kept in sync by hand.
+
+**Interview questions**
+1. What are the Service types (ClusterIP, NodePort, LoadBalancer) and when do you use each?
+2. How does traffic get from a browser to a pod in this setup?
+3. What does an Ingress add that a plain Service does not?
+
+## 15. The Helm chart and `values.yaml`
+
+**What it is.** `helm/usageline/` contains templates (Deployment, Service, ConfigMap, Secret, HPA, Postgres StatefulSet, migration Job) and `values.yaml` holding every setting: image, replica count, resources, probes, security context, HPA bounds, DB settings, and so on. Defaults live in one place, and anyone can override them with `--set` or their own values file without editing templates.
+
+**Choices to explain.**
+- **ConfigMap vs Secret.** Non-secret settings (host, port, DB name, user) go in a ConfigMap; the password goes in a Secret. The DB URL is assembled inside the container from those pieces using Kubernetes `$(VAR)` substitution, so the password is never baked into the image or the ConfigMap. `existingSecret` lets you point at a Secret managed elsewhere.
+- **Checksum annotations.** The Deployment template stores a hash of the config and secret. When they change, the hash changes, so pods are replaced and pick up the new values. Without it, `helm upgrade` would update the ConfigMap but running pods would keep old env vars.
+- **Labels.** Standard `app.kubernetes.io/*` labels let selectors and tools find the right pods.
+
+**Limits.** Kubernetes Secrets are only base64-encoded, not encrypted, unless the cluster enables encryption at rest. The default password in `values.yaml` is a dev placeholder. For anything real you would use an external secret manager. The password is placed in a URL, so it must be URL-safe (no `@`, `/`, `:`).
+
+**Interview questions**
+1. What does Helm give you over plain `kubectl apply -f` with YAML files?
+2. Why are Kubernetes Secrets not truly secret by default, and how do you improve on that?
+3. If you change a ConfigMap, do running pods see it? How do you make them restart?
+
+## 16. Deployment: replicas, probes, resources and security
+
+**What it is.** The API runs as a Deployment with 2 replicas. Each pod has:
+- a liveness probe on `/health` and a readiness probe on `/ready`;
+- resource **requests** (what the scheduler reserves: 100m CPU, 128Mi memory) and **limits** (the ceiling: 500m CPU, 256Mi memory);
+- `runAsNonRoot` with `runAsUser: 10001`, `readOnlyRootFilesystem: true`, all Linux capabilities dropped, privilege escalation disabled, and the default seccomp profile.
+
+**Why.**
+- Two replicas mean one pod can die or be updated while the other keeps serving (rolling updates need this).
+- Requests drive scheduling *and* autoscaling (CPU% is measured against the request). Limits stop one pod from starving others. A pod exceeding its memory limit is killed (OOMKilled); exceeding its CPU limit just gets throttled.
+- A numeric `runAsUser` matters: our Dockerfile has `USER app` (a name), and Kubernetes cannot prove a *named* user is non-root, so `runAsNonRoot` would reject the pod. Setting the UID 10001 explicitly resolves that.
+- The app doesn't write to disk, so a read-only root filesystem works (I confirmed the pods run and accept writes to the database). A small `emptyDir` is mounted at `/tmp` in case a library needs scratch space. If the app needed to write files, we would mount a volume rather than loosen the setting.
+- The Deployment overrides the container command to run only `uvicorn`. The Dockerfile's default command runs migrations first (good for Compose), but on Kubernetes migrations belong in the Job (see 18).
+
+**Limits.** The resource numbers are reasonable starting guesses, not measured. They should be tuned from real load data, which I have not collected. The dev Postgres container is not hardened the same way: the official image starts as root to prepare its data directory.
+
+**Interview questions**
+1. What is the difference between resource requests and limits, and what happens when each is exceeded?
+2. Why does `runAsNonRoot: true` fail with a Dockerfile that has `USER app`?
+3. What does `readOnlyRootFilesystem` protect against, and what do you do when an app needs to write files?
+
+## 17. Dev Postgres as a StatefulSet with a PVC
+
+**What it is.** A StatefulSet (not a Deployment) runs one Postgres pod. A `volumeClaimTemplate` creates a PersistentVolumeClaim (PVC), a request for 1Gi of disk that outlives any single pod. The headless Service (`clusterIP: None`) gives it a stable DNS name. In kind, a "standard" storage class provisions the volume automatically. `PGDATA` is set to a subdirectory because a freshly mounted volume can contain a `lost+found` directory that makes Postgres refuse to start in the mount root.
+
+**Why StatefulSet.** Databases need a stable identity and storage that stays attached to them. A Deployment pod is interchangeable and its storage is disposable. If the Postgres pod is deleted, the StatefulSet recreates it and re-attaches the same PVC, so data survives.
+
+**Limits (important).** This is for development only. One replica means no high availability, no backups, no replication, no tuning. In production you would use a managed database (RDS, Cloud SQL) or an operator. The PVC lives on the kind node's disk, so deleting the cluster deletes the data.
+
+**Interview questions**
+1. When would you use a StatefulSet instead of a Deployment?
+2. What happens to a PVC when its pod is deleted? When the StatefulSet is deleted?
+3. Why is running your production database inside Kubernetes a debated decision?
+
+## 18. Migrations as a Helm hook Job
+
+**What it is.** The migration is a Kubernetes Job annotated as a Helm hook (`pre-install,pre-upgrade`). Helm runs the Job *before* it creates or updates the Deployment and waits for it to succeed; if it fails, the release fails and the old version keeps running. The Job is deleted after success (`hook-succeeded`).
+
+**Why.** This is the fix for the problem noted in section 7: with several replicas starting at once, running migrations at app start can race. A single Job runs them exactly once, before any new pod starts, and the app pods get a minimal-privilege start command.
+
+**What went wrong, and what it taught (real, from this build).**
+1. **Hook ordering problem.** Pre-install hooks run *before* the normal resources exist. A fresh install has no ConfigMap, Secret or database yet, so the Job would have nothing to read and nowhere to connect. Fix: the ConfigMap and Secret are also hooks (`pre-install,pre-upgrade`, weight -10) so they exist first, and the dev Postgres is a `pre-install` hook (weight -5) so it exists before the Job on a fresh install. I chose `pre-install` only for Postgres on purpose, because a `pre-upgrade` hook is deleted and recreated on every upgrade, which would restart the database each time. I verified both a fresh install and an upgrade: the upgrade completed and the Postgres pod was not restarted.
+2. **Trade-off of that fix.** Hook resources are not tracked as part of the release, so `helm uninstall` does not delete the dev Postgres or its PVC, and changes to the Postgres template do not apply on upgrade. Acceptable for a dev database; it would be wrong for anything real, where the database is external anyway.
+3. **A bug found in testing.** My first run hung for the full 5-minute timeout because the wait-for-database init container reported `no attempt`. Cause: it runs as UID 10001, which has no entry in the Postgres image's `/etc/passwd`, so `pg_isready` could not work out a username and refused to try. Passing `-U` explicitly fixed it. I diagnosed it by running the command by hand inside the stuck container rather than guessing.
+4. **Init container.** The Job waits for the database (`pg_isready` loop) because the Postgres pod may still be starting when the Job begins.
+
+**Limits.** Rolling back the app does not roll back migrations. Migrations must be backward-compatible with the previous app version (add columns before using them, remove them a release later), because old and new pods overlap during a rolling update.
+
+**Interview questions**
+1. Why does a `pre-install` hook sometimes fail because a ConfigMap or Secret it needs does not exist yet?
+2. What are the pros and cons of migration Jobs vs init containers vs running migrations at app start?
+3. Why must database migrations be backward-compatible during a rolling update?
+
+## 19. metrics-server and the HorizontalPodAutoscaler
+
+**What it is.** metrics-server collects CPU and memory usage from each node's kubelet and exposes it through the Kubernetes API (this is what `kubectl top` reads). The HPA reads those numbers and adjusts the Deployment's replica count between 2 and 5 to keep average CPU near 70% of the pods' *requests*.
+
+**Why the extra flag.** kind's kubelet uses a self-signed certificate, so metrics-server cannot verify it and would never become ready. The install script adds `--kubelet-insecure-tls`. That is acceptable on a throwaway local cluster and **should not be used in production**, where you would configure proper kubelet certificates.
+
+**What I observed.** `kubectl top pods` returned real values and the HPA reported `cpu: 9%/70%` with 2 replicas. I did **not** run a load test, so I have not seen it scale up, and I make no claim about how it behaves under load.
+
+**Limits.** The HPA only scales on CPU here; and it can only scale pods, so on a one-node kind cluster there is no node autoscaling and the pods can only grow as far as that node allows. Also, `replicaCount: 2` in the Deployment and `minReplicas: 2` in the HPA overlap; if they ever differ, each `helm upgrade` would briefly reset the replica count.
+
+**Interview questions**
+1. How does the HPA calculate the desired replica count, and why do CPU requests matter?
+2. What problems can occur if the HPA and a Deployment's `replicas` field both try to control the count?
+3. What is the difference between horizontal pod autoscaling, vertical pod autoscaling and cluster autoscaling?
+
+## 20. The scripts, and self-healing
+
+**What it is.** `scripts/kind-up.sh` is idempotent: it reuses the cluster if it exists, builds the image, tags it with a short hash of the image ID, loads it into the cluster with `kind load docker-image`, installs a pinned metrics-server version, then runs `helm upgrade --install --wait`. `kind-down.sh` deletes only the `usageline` cluster.
+
+**Why these details.**
+- `kind load` copies the image straight into the node, because the cluster cannot see your local Docker images and we don't want a registry. With `imagePullPolicy: IfNotPresent` the node uses the loaded copy.
+- A content-based tag (not `latest`) means a rebuilt image gets a new tag, so Helm sees a change and rolls pods. With a fixed tag, the upgrade would silently do nothing.
+- `helm upgrade --install` works for both the first and later runs. `--wait` makes the script fail loudly if pods never become ready.
+- `set -euo pipefail` makes the script stop at the first error instead of carrying on.
+
+**Self-healing demo (observed).** With two API pods running, I ran `kubectl delete pod` on one. The Deployment's ReplicaSet noticed the count had dropped below 2 and created a replacement. It appeared within about 2 seconds as `0/1` (running but failing its readiness probe), and was `1/1` ready about 8 seconds after the delete. During that time the other pod kept serving, and `/ready` still returned 200. This is the "declare the desired state, controllers reconcile it" model.
+
+**Limits.** Self-healing restores pods, not data: the data survived because it is in Postgres on a PVC, not in the API pods. If the *node* died, a single-node cluster would lose everything, so this demo says nothing about node failure. The metrics-server manifest is downloaded from GitHub at run time, so the script needs internet access.
+
+**Interview questions**
+1. What is a controller / reconciliation loop in Kubernetes? Walk through what happens when you delete one pod of a Deployment.
+2. How do you get a locally built image into a cluster without a registry, and why not tag it `latest`?
+3. What does it mean for a script to be idempotent, and how did you make this one idempotent?
+
+## 21. `helm lint` in CI
+
+**What it is.** A fifth CI job runs `helm lint helm/usageline --strict` and `helm template` to render the chart. Lint catches malformed chart metadata and template mistakes; rendering catches template errors that only appear when the YAML is generated.
+
+**Limits.** Lint and render do not prove the manifests are *valid Kubernetes objects* for the cluster version, and they do not install anything. A stronger check is to spin up a kind cluster in CI and run the real install, or to validate rendered manifests with a schema tool such as kubeconform. I did not add either; the real install was verified locally only.
+
+**Interview questions**
+1. What does `helm lint` check, and what can it not catch?
+2. What is the value of `helm template` in a CI pipeline?
+3. How would you test a Helm chart end to end in CI?
