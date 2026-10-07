@@ -52,6 +52,7 @@ helm upgrade --install usageline "$ROOT/helm/usageline" \
   ${EXTRA_VALUES[@]+"${EXTRA_VALUES[@]}"} \
   --namespace "$NAMESPACE" --create-namespace \
   --set image.tag="$TAG" \
+  --force-conflicts \
   --wait --timeout 300s
 
 echo
