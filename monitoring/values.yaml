@@ -76,8 +76,8 @@ grafana:
   persistence:
     enabled: false
   resources:
-    requests: {cpu: 50m, memory: 100Mi}
-    limits: {cpu: 300m, memory: 220Mi}
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 300m, memory: 384Mi}
   # Only the dashboard sidecar runs. The datasource is provisioned directly below, which saves one sidecar
   # container (an 80Mi limit OOM-killed the sidecars here, so the dashboard one gets 128Mi).
   sidecar:
