@@ -145,3 +145,71 @@ The usual production fix is to run migrations as a separate one-off step: a Kube
 1. What are the pros and cons of testing against SQLite when production uses Postgres?
 2. What is dependency injection in FastAPI, and how did it let the tests swap the database?
 3. How would you set up CI so tests run against a real Postgres?
+
+---
+
+# Phase 2: Continuous integration (GitHub Actions)
+
+CI means a machine automatically checks every change you push. Our workflow is `.github/workflows/ci.yml` and has three independent jobs that run in parallel.
+
+## 9. Linting with ruff
+
+**What it is.** A linter reads code without running it and flags likely bugs and style problems. Ruff is a very fast Python linter and formatter. The job runs `ruff check` (lint rules) and `ruff format --check` (fails if a file isn't formatted; it does not rewrite files in CI). Rules are in `ruff.toml`: pycodestyle (`E`), pyflakes (`F`), import sorting (`I`), bugbear (`B`) and pyupgrade (`UP`).
+
+**Why.** It catches mistakes before review and ends style arguments, since the tool decides. The first run found a real finding: `raise HTTPException(...)` inside an `except` block should say `from None`, otherwise the traceback shows a confusing chained error. We fixed it.
+
+**A decision worth explaining.** Bugbear rule `B008` objects to function calls in default arguments, but `db: Session = Depends(get_db)` is how FastAPI is designed to be used. Rather than disable the rule everywhere, we told ruff that `fastapi.Depends` is safe (`extend-immutable-calls`). Prefer a narrow exception over turning a rule off.
+
+**Limits.** Linting does not prove the code works, and we haven't added type checking (mypy/pyright) or security scanning.
+
+**Interview questions**
+1. What is the difference between a linter, a formatter and a type checker?
+2. When is it right to suppress a lint rule, and how do you scope the suppression narrowly?
+3. Why does CI run `format --check` instead of reformatting files automatically?
+
+## 10. Tests against a real Postgres service container
+
+**What it is.** GitHub starts a fresh `postgres:16-alpine` container next to the job (a *service container*), waits until its health check passes, then the job installs dependencies, runs `alembic upgrade head`, and runs pytest with `TEST_DATABASE_URL` pointing at it.
+
+**Why.** This fixes the weakness we noted for SQLite tests: now CI runs the same engine as production. It also tests the migrations, which the SQLite tests never touched.
+
+**The subtle part.** Running `alembic upgrade head` is not enough if the tests then call `create_all()`, because the test code would quietly build its own tables and the migration could be broken without anyone noticing. So the test fixture was changed: on SQLite it still builds tables from the models, but on Postgres it uses the migrated schema as-is and just empties the tables between tests (`TRUNCATE ... RESTART IDENTITY CASCADE`). Now a broken migration makes the suite fail. I ran this against a throwaway database in the local compose Postgres first to confirm it passed before pushing.
+
+**Details.** The service health check (`pg_isready`) stops tests starting before the database accepts connections. Credentials in the workflow are throwaway values for a container that exists only for the job, so they are not secrets.
+
+**Limits.** We test that migrations apply to an *empty* database. We don't test upgrading a database that already has data, or a downgrade. Nothing checks that the models and the migration agree (a column added to the model but forgotten in a migration would pass on SQLite and fail on Postgres, but could slip through if no test touched it); Alembic's `check` command could be added for that. We also test only one Postgres version and one Python version (3.12, matching the Dockerfile).
+
+**Interview questions**
+1. Why run tests against real Postgres in CI when SQLite is faster?
+2. How does your CI make sure the migrations themselves are correct, not just the application code?
+3. What is a service container, and why do you need a health check on it?
+
+## 11. Docker build in CI (no push)
+
+**What it is.** The third job builds the image with Docker Buildx and `push: false`. Nothing is published anywhere.
+
+**Why.** It proves the Dockerfile still builds on a clean machine on every change. A broken Dockerfile is caught before you try to deploy. Not pushing keeps it free and avoids needing registry credentials, in line with our "everything runs for free" rule.
+
+**Caching.** Docker layers are cached in GitHub's cache (`type=gha`), so unchanged layers (like the dependency install) are reused on later runs.
+
+**Limits.** A successful build doesn't prove the container *runs*. We don't start it in CI or call `/health`. We also don't scan the image for vulnerabilities or publish it, and a published image would be the next step before deploying to Kubernetes.
+
+**Interview questions**
+1. What does a CI Docker build verify, and what can it not verify?
+2. How do Docker layer caching and the order of Dockerfile instructions affect CI time?
+3. When would you push the image from CI, and how would you tag it?
+
+## 12. Workflow design choices
+
+- **Triggers:** every push to `main` and every pull request targeting `main`. Pull requests run CI before merging; pushes to `main` re-verify after merging.
+- **Parallel jobs:** lint, test and docker don't depend on each other, so they run at the same time and feedback is faster. A failure in one doesn't hide failures in the others.
+- **pip caching:** `actions/setup-python` with `cache: pip` saves downloaded packages keyed on a hash of `requirements-dev.txt`. A change to that file invalidates the cache; otherwise later runs skip re-downloading. The first run can only save the cache, not reuse it. I did not measure the time saved, so I'm not claiming a number.
+- **Least privilege:** `permissions: contents: read` gives the workflow's token only read access, so a compromised step can't push code.
+- **Concurrency:** if you push twice quickly, the older run is cancelled, saving minutes.
+- **Version tags:** actions are pinned to major tags (`@v4`). Pinning to a full commit SHA is safer against supply-chain attacks, but harder to maintain; that is a trade-off, not an oversight.
+- **Badge:** the README shows the latest status of the workflow on `main`, so visitors see at a glance that the build is healthy.
+
+**Interview questions**
+1. Why set `permissions: contents: read` on a workflow, and what is the risk of the default?
+2. What is the difference between pinning an action to `@v4` and pinning to a commit SHA?
+3. Why run the three jobs in parallel instead of one after another, and when would you make one job depend on another with `needs`?
