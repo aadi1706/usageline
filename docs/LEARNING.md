@@ -361,3 +361,155 @@ Kubernetes (K8s) is a system that runs containers for you and keeps them in the 
 1. What does `helm lint` check, and what can it not catch?
 2. What is the value of `helm template` in a CI pipeline?
 3. How would you test a Helm chart end to end in CI?
+
+---
+
+# Phase 4: Observability and load testing
+
+Observability is being able to ask a running system "what is it doing and is it healthy?" without logging into it. The three classic signals are metrics (numbers over time), logs and traces. This phase adds metrics (Prometheus), dashboards (Grafana), alerts, and then a load test to see all of it work. Numbers quoted below were measured in this repo's runs; anything not measured is marked as such.
+
+## 22. Application metrics: counter + histogram, labelled by route template
+
+**What it is.** The API exposes `/metrics` in Prometheus's text format. Prometheus *pulls* (scrapes) it every 15 s. Two metrics are recorded for every request by a middleware:
+- `http_requests_total{method, route, status}`: a **counter** (only goes up). Rates are computed in queries with `rate(...)`.
+- `http_request_duration_seconds{method, route}`: a **histogram**. It counts how many requests fell under each latency bound (5 ms, 10 ms, ... 5 s), which lets Prometheus estimate percentiles with `histogram_quantile`.
+
+This follows the "RED" method: **R**ate, **E**rrors, **D**uration.
+
+**Why route templates, not URLs.** The `route` label holds `/tenants/{tenant_id}`, never `/tenants/42`. Every distinct label value creates a new time series stored in memory. Raw paths would create one series per tenant (and per scanner hitting random URLs), which is the classic *cardinality explosion* that takes down Prometheus. Requests that match no route share a single `unmatched` label. Tests check all of this: 10 distinct IDs produce no new label values, and unknown paths never appear in the output.
+
+**Details.** `/metrics` itself is not counted. Status is recorded as 500 if the handler raises. Single process per pod, so the default in-memory registry is correct (multi-worker servers need Prometheus's multiprocess mode).
+
+**Limits.** Histogram percentiles are *estimates* limited by bucket boundaries (p95 can only be as precise as the gap between buckets). Probe requests (`/health`, `/ready`) are counted too, so at low traffic they dominate the totals; dashboard panels exclude them for rate and latency, but the 5xx alert deliberately does not (see 26). There are no database-level metrics yet.
+
+**Interview questions**
+1. What is the difference between a counter, a gauge and a histogram? Which would you use for request latency?
+2. What is metric cardinality and how can a label like `user_id` or the raw URL path break Prometheus?
+3. Why does Prometheus pull metrics instead of having apps push them, and when is pushing needed?
+
+## 23. kube-prometheus-stack, sized for a small laptop
+
+**What it is.** `kube-prometheus-stack` is one Helm chart that installs the Prometheus Operator, Prometheus, Alertmanager, Grafana and kube-state-metrics. The **Operator** is a controller that adds new Kubernetes object types (CRDs): `ServiceMonitor` ("scrape this Service"), `PrometheusRule` ("these alert rules") and so on, so monitoring config is declared in YAML next to the app rather than in one central Prometheus config file. `kube-state-metrics` turns Kubernetes object state (replicas, readiness, requests) into metrics. Our overrides are in `monitoring/values.yaml`.
+
+**What we turned off or shrank, and why.** The Docker VM here has about 3.8 GiB in total, shared with the kind node and, normally, two other containers, so every component got explicit requests/limits and these cuts:
+- Built-in alert/recording rules off (`defaultRules.create: false`): we ship our own three alerts, and ~100 default rule groups cost memory and create noise.
+- node-exporter, etcd, scheduler, controller-manager, kube-proxy, CoreDNS and API-server scrapers off. They are not needed to monitor our app, and on kind several are not reachable anyway.
+- **Kept the kubelet scrape on purpose**: it exposes cAdvisor, the source of per-container CPU usage that the CPU-vs-requests panel and our autoscaling analysis depend on.
+- Retention 6 h with a 400 MB size cap, and **no persistent volumes**: data is in an `emptyDir`, so restarting the Prometheus pod loses history. Fine for a demo, wrong for real use.
+- Stock Grafana dashboards off; only ours is loaded.
+- **Alertmanager kept.** Measured at about 49 MiB for the pod (two containers) with a 64 Mi limit on the main one, it fit the budget, and it lets us verify the full path from rule to notification. If memory had been tighter, dropping it would still leave alerts visible in Prometheus's own Alerts page; what you lose is grouping, silencing and routing to receivers.
+
+**What went wrong (honest sizing lessons).** My first memory limits were guesses and two were too small. Both showed up as `OOMKilled` (exit 137): the Grafana sidecars at an 80 Mi limit, and later the Grafana container itself at 220 Mi, which died while I was running dashboard queries. I raised them (sidecar 128 Mi, Grafana 384 Mi) and removed the datasource sidecar entirely by provisioning the datasource directly. Measured afterwards, the Grafana pod used about 367 MiB including its sidecar, so it is still near its limits. The lesson: limits should come from measurement, and a limit set too low turns into restarts rather than a graceful slowdown.
+
+**Limits.** This is a single replica of everything with no persistence, a default admin password (`admin`) and no TLS; it is a local learning setup, not a production monitoring design. In production you would add persistent storage, longer retention (or remote write / Thanos), HA Prometheus and Alertmanager, and real credentials.
+
+**Interview questions**
+1. What does the Prometheus Operator do, and why use ServiceMonitor objects instead of editing `prometheus.yml`?
+2. What do you lose if you run Prometheus without persistent storage, and what do you do about it in production?
+3. Why did you keep the kubelet/cAdvisor scrape but turn off the others? What does kube-state-metrics provide that cAdvisor does not?
+
+## 24. ServiceMonitor, toggled in `values.yaml`
+
+**What it is.** A `ServiceMonitor` tells Prometheus which Service to scrape, on which port and path, and how often. Ours selects the API's Service by label, scrapes the `http` port at `/metrics` every 15 s, and so Prometheus scrapes each API **pod** individually (it discovers the pods behind the Service). A confirmed result: both API pods appeared as targets in state `up`.
+
+**The ordering problem.** A `ServiceMonitor` object only exists if the Operator's CRDs are installed. If the chart always rendered one, `helm install` would fail on a cluster without the monitoring stack. So `serviceMonitor.enabled`, `prometheusRule.enabled` and `grafanaDashboard.enabled` default to `false`, and `monitoring/usageline-values.yaml` flips them on. `kind-up.sh` checks whether the CRD exists and adds that file only if so; `monitoring-up.sh` installs the stack first and then re-runs `kind-up.sh`. Result: the app works with or without monitoring.
+
+**Discovery gotcha.** By default the stack's Prometheus only picks up ServiceMonitors/PrometheusRules labelled with its own Helm release. We set the `*SelectorNilUsesHelmValues` options to `false` so it discovers objects from any namespace, otherwise our app's monitor in the `usageline` namespace would be silently ignored. Also expect a delay: after the objects were created it took a minute or two for the targets to appear and for the first successful scrape.
+
+**Interview questions**
+1. How does Prometheus find out which pods to scrape in Kubernetes?
+2. Why is a CRD-dependent resource in a Helm chart a problem on a cluster without that CRD, and how did you handle it?
+3. A ServiceMonitor exists but no target shows up in Prometheus. What do you check?
+
+## 25. A Grafana dashboard as code
+
+**What it is.** The dashboard is a JSON file (`helm/usageline/files/dashboard.json`) wrapped into a ConfigMap labelled `grafana_dashboard: "1"`. A sidecar container in the Grafana pod watches for ConfigMaps with that label (in all namespaces) and loads them. The dashboard therefore deploys with the app, lives in git and can be reviewed in a pull request, instead of being hand-built in the UI and lost with the pod. The datasource is referenced by a fixed `uid` (`prometheus`) so the JSON stays portable.
+
+**Panels.** Request rate by route (probes excluded); 5xx error ratio; p50 and p95 latency; pod count (available, desired by the Deployment, desired by the HPA); and CPU used vs CPU requests vs the HPA's 70% target line vs the limit.
+
+**How I verified it.** Grafana found the dashboard by its search API (`Usageline API`), and I ran **all 12 panel queries through Grafana's own query API** over the load-test window; every one returned data. I did not view it in a browser, so I have not checked how the panels look visually. The dashboard is 5 panels, kept small on purpose.
+
+**Why "CPU vs requests".** The HPA measures CPU as a percentage of each pod's *request*, not of the node or the limit. Plotting usage next to the request and the 70% line shows exactly why (and when) it scales.
+
+**Limits.** Namespaces and the deployment name are hard-coded in the queries; a dashboard variable would be better. Editing the dashboard in the Grafana UI does not write back to git.
+
+**Interview questions**
+1. What is the advantage of provisioning dashboards from files/ConfigMaps rather than building them in the UI?
+2. Why is CPU usage shown relative to the pod's request when explaining autoscaling?
+3. What does a `histogram_quantile(0.95, ...)` query actually compute, and how can it mislead?
+
+## 26. Alerts: PrometheusRule, and how each was verified
+
+**What it is.** A `PrometheusRule` holds alert rules. Prometheus evaluates each expression every 30 s; when it is true it becomes *pending*, and after staying true for the `for` duration it becomes *firing* and is sent to Alertmanager. The `for` clause prevents flapping on brief blips. Thresholds are in `values.yaml`.
+
+| Alert | Fires when | `for` |
+| --- | --- | --- |
+| `UsagelineHigh5xxRate` | 5xx responses are over 5% of all requests (5 min window) | 2 m |
+| `UsagelineHighLatencyP95` | p95 latency of non-probe routes is over 0.5 s (5 min window) | 5 m |
+| `UsagelinePodsNotReady` | a Running pod in the namespace is not Ready | 2 m |
+
+**How I verified each one loads.** Through the Prometheus API (`/api/v1/rules`): all three appeared with `health: ok`, no `lastError`, and state `inactive`. I also ran the underlying expressions by hand (for example the `up` and pod-readiness queries) and they returned values, so they are not silently matching nothing.
+
+**How I verified they can fire.**
+- `UsagelineHigh5xxRate` and `UsagelinePodsNotReady`: I scaled the dev Postgres to zero. `/ready` started returning 503, both API pods went unready, and about 200 s later both alerts were *firing* (first *pending*, then firing) and Alertmanager's API listed them as active. I then scaled Postgres back up; the data was intact thanks to the PVC.
+- `UsagelineHighLatencyP95`: **loaded and evaluating, but never fired.** Under the load test the server-side p95 peaked at 0.246 s, below the 0.5 s threshold, and the alert was never even pending. So I have shown it is valid and evaluating, but not that it fires.
+
+**Design choices and limits.**
+- The 5xx ratio includes the probe routes. That is intentional: a database outage shows up as `/ready` 503s, which is a real failure. The cost is that at low real traffic the ratio is dominated by probe requests, and during my test the ratio reached about 50% shortly after the fault injection (it is a 5-minute window, so the number lingers after recovery).
+- The not-ready rule joins on "phase = Running" so completed Job pods (which report not-ready) do not trigger it.
+- Alerts only go to Alertmanager. No receiver (Slack, email, PagerDuty) is configured, so nothing would actually page anyone.
+- Thresholds are first guesses, not based on an SLO.
+
+**Interview questions**
+1. What is the difference between pending and firing, and why does the `for` clause exist?
+2. Why alert on symptoms (error rate, latency) rather than only on causes (CPU is high)?
+3. How would you test that an alert rule works before an incident, without breaking production?
+
+## 27. The k6 load test
+
+**What it is.** `loadtest/k6.js` simulates users. Each virtual user (VU) loops: create a tenant, record 3 usage events, generate an invoice, read it back, then pause 200–500 ms. Load ramps 0 → 5 VUs (30 s), → 20 (1 min), → 40 (2 min hold), → 0 (30 s): four minutes in total, against `localhost:8081`. `setup()` creates the plan once (and reuses it on later runs). `thresholds` define pass/fail (error rate under 1%, p95 under 1 s).
+
+**Why this shape.** A ramp lets you see where behaviour changes rather than just a single number; a plateau is long enough for the autoscaler (which acts on 15-second cycles) to react; and 40 VUs is modest, because the load generator, the kind node and the monitoring stack all share one laptop. The load generator runs on the same machine as the system under test, so it competes for CPU, which makes absolute numbers pessimistic and non-portable.
+
+**Limits.** One scenario, uniform user behaviour, no think-time variation beyond a small jitter. The test writes real rows: this run created about 9,400 tenants and roughly three times as many usage events in the dev database, which is harmless but means each run leaves data behind. The thresholds are checks for this run, not a performance claim.
+
+**Interview questions**
+1. What is the difference between a load test, a stress test and a soak test?
+2. Why can results be misleading when the load generator runs on the same machine as the system under test?
+3. What is a threshold in k6 and how would you use one in CI?
+
+## 28. What happened under load (observed)
+
+Measured in a single run on this laptop. These numbers describe this setup only.
+
+| What | Observed |
+| --- | --- |
+| Requests | 56,509 HTTP requests in 4 minutes (k6: 235 req/s average over the whole run, including ramp up/down), 9,418 complete iterations, max 40 VUs |
+| Peak throughput | 367 req/s (Prometheus, 30 s window, probes excluded) |
+| Errors | 0.00% failed (k6); no non-probe 5xx series in Prometheus during the run |
+| Latency | k6 client-side p95 149 ms (median 4.9 ms, max 2.57 s); server-side p95 peaked at 0.246 s (1-minute window) |
+| HPA | 2 → 4 replicas at 21:56:41, → 5 (its maximum) at 21:56:56 |
+| CPU | HPA's metric rose 13% → 31% → 62% → 107% (21:55:56–21:56:26), reached 196% at the first scale-up, then stayed between about 155% and 270% of requests at 5 replicas. Peak total usage was 1.31 cores across the API pods vs 0.5 cores requested |
+| Memory | The kind node rose from about 2.33 to 2.70 GiB (of the VM's 3.83 GiB) during the run |
+
+**How the HPA behaved, and why I did not change anything.** It scaled, so there was nothing to investigate on the "did it scale" question. First reaction came roughly 60–70 s after the load began, which is the sum of metrics-server's sampling interval, the HPA's 15 s sync loop and the ramp itself. It went from 2 to 4 in one step, consistent with the default scale-up behaviour that limits how fast replicas can grow. After that CPU stayed *above* the 70% target even at 5 pods, meaning the limit that bound the system was `maxReplicas: 5`, not the autoscaler's responsiveness. The pods also stay under their 500m CPU limit (about 260m each at peak), so they were not CPU-throttled. At the end of my observation window (shortly after the load stopped) the HPA still showed 5 replicas with CPU at 17%; I did not wait for it to scale back down, so I have not observed the scale-down.
+
+**Why it was easy to trigger.** The CPU request is only 100m while the limit is 500m, so a pod using a fraction of a core is already "over 100% of request". That makes the HPA sensitive. Requests, limits and the HPA target together define the behaviour; they are tuned here to demonstrate scaling on a laptop, not derived from production capacity planning.
+
+**Limits.** One run, one machine, shared resources. Not a benchmark: it says nothing about performance on other hardware, and there is no comparison to a baseline or to a different replica count. Peak throughput here is probably limited by the laptop (and by the 5-replica cap) rather than by the application's true ceiling, but I did not test that.
+
+**Interview questions**
+1. How does the HPA decide how many replicas it needs, and why can it take over a minute to react?
+2. What is the relationship between CPU requests, CPU limits and the HPA's utilisation target? What happens to a pod at its CPU limit?
+3. Under load the HPA was stuck at its maximum with CPU still above target. What would you look at next?
+
+## 29. Runbook, scripts and CI
+
+- **`docs/RUNBOOK.md`:** for each alert, what it means, how to diagnose it (dashboard panels and `kubectl` commands) and what to do. Alerts without a response procedure just create anxiety; each alert also carries a `runbook` annotation pointing at its section.
+- **`scripts/monitoring-up.sh`:** installs the stack with a pinned chart version (reproducible), then re-runs `kind-up.sh`. It prints the port-forward commands (Grafana on 3000, Prometheus on 9090, Alertmanager on 9093).
+- **CI:** the helm job now lints the chart both with defaults and with the monitoring values, renders both, and renders `kube-prometheus-stack` with our `monitoring/values.yaml`, so a typo in those files fails the build. This checks that the YAML renders; it does not prove the objects are valid on a cluster or that the stack fits in memory (I found that out the hard way, above).
+
+**Interview questions**
+1. What belongs in a runbook entry for an alert, and why link it from the alert itself?
+2. Why pin the version of a third-party Helm chart?
+3. What can `helm template` catch in CI, and what only shows up when you install on a real cluster?
