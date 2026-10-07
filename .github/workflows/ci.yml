@@ -71,3 +71,12 @@ jobs:
           tags: usageline:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint chart
+        run: helm lint helm/usageline --strict
+      - name: Render chart
+        run: helm template usageline helm/usageline > /dev/null
