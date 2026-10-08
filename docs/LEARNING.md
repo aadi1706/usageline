@@ -850,3 +850,22 @@ CI (continuous integration) checks every change; CD (continuous delivery/deploym
 1. What does `helm upgrade --atomic` do on failure, and how long does it take to notice a bad release? What controls that?
 2. Why does a failing rolling update not cause downtime, and what Deployment settings make that true?
 3. Why was a nonexistent image tag a weaker test of rollback than a failing readiness probe in this chart?
+
+## 49. The deploy-rehearsal job in CI
+
+**What it is.** After `publish` succeeds, a `deploy-rehearsal` job runs on a fresh runner: it creates a kind cluster (using the repo's `kind/cluster.yaml`, which maps the Service's NodePort to `localhost:8081`), logs in to GHCR, **pulls the image that `publish` pushed** (by commit SHA, so the registry artifact is what gets tested, not a rebuild), loads it into the cluster with `kind load`, installs metrics-server, and runs `scripts/deploy-rehearsal.sh`: atomic install, smoke test, the broken upgrade, rollback verification. The script writes its report (install time, how long the broken upgrade took to fail and roll back, probe results, final release state) to the job summary.
+
+**Decisions.**
+- **A rehearsal, not a deployment.** Nothing is deployed anywhere permanent; the cluster disappears with the runner. It proves that this exact published image installs, serves, and can be rolled back with the real chart, which is the strongest check possible without a real environment or cloud account.
+- **Image pull path.** The image is pulled on the runner (where the workflow's token can read the package) and loaded into kind, instead of making the cluster pull from GHCR. That avoids creating image-pull secrets in the cluster and does not depend on the package's visibility setting.
+- **Least privilege.** The job has `packages: read` only, not write.
+- **Same scripts as local.** Because the logic is in scripts, I ran the whole flow locally on a temporary kind cluster first (section 48); CI only supplies the cluster and the image.
+- **Helm pinned to 4.3.0** to match the version I use locally; `--atomic` is used as specified and is a deprecated alias in Helm 4.
+- **Diagnostics on failure.** If anything fails, the job prints pods, descriptions, logs and release history, so a failed run can be diagnosed from the log alone.
+
+**Limits.** It runs only after a push to `main` (it needs the published image), so a pull request never exercises it. A kind cluster has none of the production differences (managed Kubernetes, real load balancers, real databases). The dev Postgres is deployed by the chart itself, so the database side is not tested against RDS. The rehearsal also runs after publish, so a release that fails rehearsal is already in the registry: it flags a bad image rather than preventing its publication.
+
+**Interview questions**
+1. What is the value of rehearsing a deployment against a throwaway cluster, and what can it not tell you?
+2. Why test the image that was actually pushed to the registry instead of rebuilding it in the test job?
+3. The rehearsal job runs after `publish`. What are the trade-offs of that ordering compared with running it before the image is pushed?

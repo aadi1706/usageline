@@ -170,3 +170,46 @@ jobs:
             echo "- Tag: \`$IMAGE_REPOSITORY:$GITHUB_SHA\`"
             echo "- Digest: \`$DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Rehearses a real deployment of the image that was just published: a kind cluster inside the runner, an atomic
+  # Helm install, a smoke test, then a deliberately broken upgrade to prove the automatic rollback.
+  deploy-rehearsal:
+    needs: [publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read # pull the image that publish pushed
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: usageline
+          config: kind/cluster.yaml # maps the Service's NodePort 30080 to localhost:8081 on the runner
+          wait: 120s
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull the published image and load it into kind
+        run: |
+          docker pull "$IMAGE_REPOSITORY:$GITHUB_SHA"
+          kind load docker-image "$IMAGE_REPOSITORY:$GITHUB_SHA" --name usageline
+      - name: Install metrics-server
+        run: ./scripts/install-metrics-server.sh kind-usageline
+      - name: Deploy (atomic), smoke test, break the release and roll back
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          KUBE_CONTEXT: kind-usageline
+        run: ./scripts/deploy-rehearsal.sh
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods,svc,hpa -A -o wide || true
+          kubectl -n usageline describe pods || true
+          kubectl -n usageline logs deploy/usageline --tail=100 || true
+          helm --kube-context kind-usageline -n usageline history usageline || true
