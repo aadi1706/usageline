@@ -99,7 +99,7 @@ jobs:
         run: terraform fmt -check -recursive terraform
       - name: Validate (no backend, no credentials)
         run: |
-          for dir in terraform/bootstrap terraform/envs/dev terraform/envs/prod; do
+          for dir in terraform/bootstrap terraform/envs/dev terraform/envs/prod terraform/envs/local; do
             echo "::group::$dir"
             terraform -chdir="$dir" init -backend=false -input=false
             terraform -chdir="$dir" validate

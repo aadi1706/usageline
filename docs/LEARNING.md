@@ -753,3 +753,16 @@ All of this ran against the local kind cluster only; the AWS folders were not to
 1. What does it mean for Terraform to detect drift, and why did it not notice the manual `kubectl patch`?
 2. Why save a plan with `-out` and apply that file instead of running `apply` directly?
 3. The plan showed many `known after apply` lines for a one-value change. How do you tell real changes from provider noise?
+
+## 44. CI for the local environment
+
+**What changed.** The `terraform` CI job now runs `terraform init -backend=false` and `terraform validate` in `terraform/envs/local` as well. The format check, `tflint --recursive` and checkov already scan the whole `terraform/` tree, so the new folder is covered by them without further changes; only the explicit list of folders in the validate loop needed the new entry. I ran every one of those commands locally first (format, validate in all four folders, tflint, checkov), all clean.
+
+**What CI can and cannot say about this folder.** It proves the configuration is syntactically valid, correctly typed and consistent with the provider schemas (including the pinned provider versions in the lock file, which were generated for Linux so CI can use them). It does **not** run `plan` or `apply` here: that needs a kind cluster, which a CI runner does not have, so everything in sections 42 and 43 (real apply, drift behaviour) was verified by hand on my machine only. A bug like the cluster guard's `metadata[0]` mistake (section 41) is exactly the class of error that `validate` misses and only a plan against a cluster reveals.
+
+**Limits and a way forward.** A fully automated check would start a kind cluster inside the CI job (kind runs fine on GitHub's runners), build and load the image, run `terraform apply`, curl `/health`, and destroy. That would take several minutes per run and was not added.
+
+**Interview questions**
+1. What is the difference between what `terraform validate` proves and what a successful `plan` proves?
+2. Why is it useful to commit the dependency lock file with hashes for more than one platform?
+3. How would you test a Terraform configuration that manages a Kubernetes cluster in CI without touching a real cluster?
