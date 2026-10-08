@@ -715,3 +715,20 @@ Phase 5a described AWS infrastructure that was only validated. This phase uses T
 1. What are the ways a `terraform apply` can end up on the wrong cluster, and how does hard-coding the provider context and adding a precondition address them?
 2. Why does the usageline release need `depends_on` on the monitoring release when there is no attribute reference between them?
 3. When is local state acceptable, and what do you lose compared with a remote locked backend?
+
+## 42. Where Terraform stops: splitting the bootstrap from the releases
+
+**What happened.** When I came to hand the existing Helm releases to Terraform, the kind cluster had been deleted, so there was nothing to import. The decision became: how does the cluster get back, and where does Terraform take over?
+
+**Decision.** `scripts/kind-up.sh` used to do everything: create the cluster, build and load the image, install metrics-server, and `helm upgrade --install`. I split out `scripts/kind-bootstrap.sh`, which does only the first three and prints the loaded image tag as its only stdout (progress goes to stderr). `kind-up.sh` now calls it and then runs Helm, so the old workflow is unchanged; the Terraform workflow runs the bootstrap and then `terraform apply -var image_tag=<tag>`.
+
+**Why not `terraform import` for existing releases.** On a fresh cluster there is nothing to import. In general, importing a `helm_release` brings in only some attributes (the values you passed are not recorded), so the first plan after an import usually shows an in-place update that re-applies the chart. Creating from scratch is cleaner, and it proves the code can build the whole stack from nothing, which is the point of infrastructure as code. Import is the right tool when you cannot afford to recreate something (a production database, say).
+
+**Where the boundary is, and why.** Docker builds, `kind load` and cluster creation are imperative, local-machine actions; Terraform models desired state of resources it can read back. Putting them in a shell script keeps Terraform's plans honest, at the cost that "terraform apply" alone cannot start from a missing cluster.
+
+**Limits.** The tag is a hand-off between two tools (a value copied from the script's output to a variable), so a stale tag causes `ImagePullBackOff` rather than a Terraform error. metrics-server is applied with `kubectl`, so Terraform does not own it, and nothing in Terraform detects it being missing (the HPA would just show `<unknown>` CPU).
+
+**Interview questions**
+1. When would you use `terraform import` instead of recreating a resource, and what problems does importing a Helm release have?
+2. How do you decide which steps belong in Terraform and which in a script?
+3. A teammate runs `terraform apply` on a fresh machine and the pods are in `ImagePullBackOff`. What are the likely causes in this setup?
