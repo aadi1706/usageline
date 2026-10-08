@@ -94,6 +94,20 @@ State is a local, git-ignored `terraform.tfstate`. Terraform does not see manual
 cd terraform/envs/dev && terraform init -backend=false && terraform validate
 ```
 
+## CI/CD
+
+Every push and pull request runs lint, tests (against real Postgres), the Docker build, Helm lint and the Terraform checks. On pushes to `main`, once all of those pass:
+
+1. **publish** builds the image, scans it with Trivy (fails on a CRITICAL vulnerability that has a fix; the HIGH/CRITICAL counts go in the job summary) and pushes it to `ghcr.io/aadi1706/usageline`, tagged with the commit SHA (never `latest`).
+2. **deploy-rehearsal** creates a kind cluster inside the runner, pulls the published image, installs the chart with `helm upgrade --install --atomic --timeout 5m`, runs a smoke test (health, ready, create tenant, record usage, generate invoice), then deploys a deliberately broken version and checks that Helm rolls it back and the previous version keeps serving. The time taken is recorded in the job summary.
+
+No cloud credentials or paid services are used; the only token is the built-in `GITHUB_TOKEN`, with `packages: write` on the publish job only. Actions are pinned to commit SHAs. The same scripts run locally:
+
+```bash
+./scripts/trivy-scan.sh usageline:local          # needs trivy (brew install trivy)
+./scripts/smoke-test.sh http://localhost:8081     # against a running API
+```
+
 ## Run the tests
 
 ```bash
