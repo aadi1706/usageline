@@ -71,6 +71,21 @@ k6 results (`loadtest/k6.js`):
 - p95 96 ms
 - 0.00% failed requests
 
+### Managing the Kubernetes releases with Terraform (local)
+
+`terraform/envs/local` installs the monitoring stack and the API chart on the kind cluster with Terraform instead of Helm scripts. Its providers use the hard-coded context `kind-usageline`, so it cannot touch another cluster.
+
+```bash
+TAG=$(./scripts/kind-bootstrap.sh)      # cluster + image + metrics-server, no Helm releases
+cd terraform/envs/local
+terraform init
+terraform plan  -var image_tag=$TAG -out=tfplan
+terraform apply tfplan
+curl localhost:8081/health
+```
+
+State is a local, git-ignored `terraform.tfstate`. Terraform does not see manual `kubectl` edits to the releases' objects (see `docs/LEARNING.md`, section 43).
+
 ## Infrastructure (Terraform, AWS)
 
 `terraform/` defines a VPC, ECR, SQS (with a dead-letter queue), RDS PostgreSQL, EKS (with IRSA) and least-privilege IAM as modules, composed by `envs/dev` and `envs/prod`, with remote state in S3 (`terraform/bootstrap` creates the bucket). It is **validate-only**: it has been formatted, validated and statically analysed (`terraform fmt`, `validate`, `tflint`, `checkov` in CI, no AWS credentials), but never planned or applied. Estimated monthly cost is in [docs/COST_ESTIMATE.md](docs/COST_ESTIMATE.md).
