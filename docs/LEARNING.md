@@ -534,3 +534,157 @@ Side observation: after the load test and the redeploys, the HPA was back down t
 1. Exit code 137 and `OOMKilled`: what does each tell you, and how do you tell which container in a multi-container pod was killed?
 2. How would you choose a memory limit for a service like Grafana whose usage depends on what people do with it? What would you monitor?
 3. Why can `helm upgrade` conflict with an HPA over `spec.replicas`, and what are two ways to resolve it?
+
+---
+
+# Phase 5a: Terraform for AWS (validate-only)
+
+Terraform is "infrastructure as code": you describe cloud resources in `.tf` files, and `terraform apply` makes AWS match them. **Nothing in this phase has been planned or applied.** There are no AWS credentials on this machine, and the job in CI has none either. What *was* run: `terraform fmt`, `terraform validate` (which checks syntax and types and never contacts AWS), `tflint` and `checkov` (static analysers that read the code). So everything below describes code that is well-formed and passes static checks; it has not been proven to create working infrastructure. Cost figures are in [COST_ESTIMATE.md](COST_ESTIMATE.md) and are estimates.
+
+## 31. Layout: modules, environments, bootstrap
+
+**What it is.** `terraform/modules/*` hold reusable building blocks (`vpc`, `ecr`, `sqs`, `rds`, `iam`, `eks`), each with `variables.tf` (inputs), `outputs.tf` (what other modules can use), `main.tf`, `versions.tf` and a short README. `terraform/envs/dev` and `envs/prod` are thin "root modules" that call those modules with different settings. `terraform/bootstrap` creates the state bucket (see 32).
+
+**Why.** One definition of "a VPC" or "a database" is reused by both environments, so dev and prod differ only in the values passed in (NAT on/off, Multi-AZ, node counts, deletion protection), which makes drift between them easy to see in a diff. Modules expose only what callers need, and outputs wire them together (the VPC's subnet IDs feed RDS and EKS; the EKS security group feeds the database's allow-list; the queue ARN and database secret ARN feed the IAM role).
+
+**Choices.**
+- Modules are written with plain AWS resources instead of pulling a community module, so every setting is visible and reviewable in this repo.
+- Provider versions are constrained (`aws ~> 6.0`, `tls ~> 4.0`) and the exact versions are pinned by committed `.terraform.lock.hcl` files, generated for both macOS (arm64) and Linux (CI), so everyone and CI download identical, hash-verified providers.
+- Dev has EKS and NAT **off** by default (they bill by the hour). A validation rule on `enable_eks` fails if you turn EKS on without NAT, because worker nodes sit in private subnets and need outbound internet to join the cluster and pull images. `module.eks` uses `count`, and consumers read it with `one(module.eks[*].x)` or `module.eks[*].x` so that nothing breaks when it is absent.
+
+**Limits.** I could not test that cross-variable validation rule by planning (planning needs credentials), so it has been reviewed but not exercised. Two near-identical environment folders will drift unless someone keeps them in sync; at larger scale people use a tool like Terragrunt or workspaces.
+
+**Interview questions**
+1. What is the difference between a Terraform module and a root module, and why split code into modules?
+2. What does `.terraform.lock.hcl` do, and why commit it?
+3. Why would you use `count` on a module call, and what problems does that create for anything that references it?
+
+## 32. Remote state, and which locking method
+
+**What it is.** Terraform records what it has created in a *state file*. If it lives on one laptop, nobody else can safely change the infrastructure, and losing the file is a disaster. Both environments store state in an S3 bucket (`backend "s3"` in `backend.tf`, with a different `key` for dev and prod). The bucket itself comes from `terraform/bootstrap`, which uses local state: a chicken-and-egg problem (you cannot store state in a bucket that does not exist yet), so that folder is applied once by hand.
+
+**Bucket hardening.** Versioning (to recover from a bad write), encryption with a dedicated KMS key that rotates, all public access blocked, a policy denying non-TLS requests, and old versions expiring after 90 days. `force_destroy = false` refuses to delete a bucket that still holds state.
+
+**Locking: S3 native locking (`use_lockfile = true`).** While one person runs `apply`, Terraform writes a small `.tflock` object next to the state using an S3 conditional write; a second run sees it and stops, so two people cannot corrupt the state at once. I chose this because it needs only the bucket: the older approach also required a DynamoDB table (extra resource, extra permissions, extra cost), and current Terraform treats DynamoDB-based locking as deprecated. It needs Terraform 1.10 or newer, which `required_version` enforces.
+
+**How the bucket name stays out of code.** A `backend` block cannot use variables, so `bucket` and `region` are passed at init time (`terraform init -backend-config=backend.hcl`); `backend.hcl.example` shows the format and `backend.hcl` is git-ignored. For `validate` and CI the backend is skipped (`init -backend=false`), which is why no credentials are needed.
+
+**Limits.** The bootstrap state is local, so it must be kept safe (or imported later); it is small and rarely changes. No cross-region replication or access logging on the state bucket (checkov skips with reasons in the code). Whoever runs Terraform needs permissions on the state keys and the KMS key; those are described in the bootstrap README, not created here.
+
+**Interview questions**
+1. What is in a Terraform state file, why is it sensitive, and what goes wrong without locking?
+2. How does S3 native state locking work, and why is it replacing DynamoDB locking?
+3. What is the bootstrap problem with remote state and how do you solve it?
+
+## 33. VPC: two AZs, optional NAT
+
+**What it is.** A private network across two availability zones (separate data centres in a region), with a public and a private subnet in each. Public subnets route to an internet gateway; private subnets do not. A **NAT gateway** lets private resources start outbound connections (for example to pull images) without being reachable from the internet.
+
+**Why NAT is optional and off in dev.** A NAT gateway costs money for every hour it exists (about $33 a month each at the price I assumed, before data charges), even when idle. Prod turns it on with one per AZ so losing an AZ does not cut off the other; dev leaves it off. A free S3 gateway endpoint keeps S3 traffic (including ECR image layers) off the NAT.
+
+**Other choices.** The default security group is emptied so nothing silently relies on it; public subnets never auto-assign public IPs; flow logs record network traffic to CloudWatch; subnets carry the tags Kubernetes needs to find them for load balancers.
+
+**Limits.** The subnet layout is fixed at /20 slices of the VPC CIDR and exactly two AZs. Private subnets in dev have no internet at all, so nothing there can reach out (which is fine for RDS but is why EKS needs NAT). No VPC interface endpoints (each costs about $7 a month per AZ). No network ACLs beyond defaults. Flow logs are unencrypted with a customer key (skip documented).
+
+**Interview questions**
+1. What makes a subnet public vs private in AWS?
+2. What does a NAT gateway do, what does it cost you, and what are cheaper alternatives?
+3. Why spread subnets across two AZs, and what does a single NAT gateway do to that design?
+
+## 34. SQS with a dead-letter queue
+
+**What it is.** A queue for usage events, plus a **dead-letter queue (DLQ)**. If a consumer fails to process a message 5 times (`max_receive_count`), SQS moves it to the DLQ instead of retrying forever. A "poison" message that always crashes the consumer therefore stops blocking the queue, and it is kept for 14 days so someone can inspect it.
+
+**Details.** `visibility_timeout` (60 s) must be longer than the consumer's processing time, or a message is delivered twice. The DLQ accepts messages only from the main queue (`redrive_allow_policy`). Both queues are encrypted at rest and carry a policy that denies non-TLS access; that policy's `sqs:*` is a Deny statement, so it can only remove access, and the comment in the code says so.
+
+**Limits.** No alarm on the DLQ depth is created here, which is what actually makes a DLQ useful. Standard queues deliver at least once and may reorder, so consumers must be idempotent; FIFO queues were not chosen.
+
+**Interview questions**
+1. What is a dead-letter queue and what problem does it solve?
+2. What is the visibility timeout and what happens if it is too short?
+3. Why must consumers of a standard SQS queue be idempotent?
+
+## 35. ECR with scanning and a lifecycle policy
+
+**What it is.** A private registry for the API's Docker image. Scan-on-push checks each image for known vulnerabilities. Tags are **immutable**, so `v1.2.3` can never be silently overwritten and a deployment always means the same bytes. A lifecycle policy deletes untagged images after 7 days and keeps only the 20 newest images, so storage cost does not grow without bound.
+
+**Limits.** Basic scanning only reports; nothing blocks a vulnerable image from being deployed. Immutable tags mean a CI pipeline must always push unique tags (a commit SHA), never `latest`. Encryption uses AWS's managed key unless a key is passed in (checkov skip documented). Nothing pushes to this registry yet: our CI builds the image but does not publish it.
+
+**Interview questions**
+1. Why make image tags immutable, and what does it force your CI to do?
+2. What does ECR scan-on-push actually protect you from, and what does it not?
+3. What does a lifecycle policy do and what could go wrong if it is too aggressive?
+
+## 36. RDS PostgreSQL and the password
+
+**What it is.** A `db.t4g.micro` (smallest Graviton class) PostgreSQL instance in private subnets, encrypted at rest, not publicly accessible. Only the security groups you list may connect on port 5432, with no CIDR rules.
+
+**The password.** With `manage_master_user_password = true`, RDS generates the master password itself and stores it in AWS Secrets Manager. The password therefore never appears in the Terraform code, in a variable, or in the state file, and the application reads the secret at runtime (the IAM module lets exactly one role read exactly that secret). This was a requirement, and it is also the only approach that keeps the password out of state.
+
+**Other settings.** A parameter group forces TLS (`rds.force_ssl`) and logs DDL plus any statement slower than 1 second; IAM database authentication, CloudWatch log export, enhanced monitoring, automated backups, storage autoscaling and deletion protection are on. Dev turns off Multi-AZ and deletion protection and skips the final snapshot (documented checkov skips apply to dev only); prod keeps them on.
+
+**Limits.** Performance Insights is off (skip documented). A single-AZ dev database has no failover. The managed secret is not automatically rotated in our code. The instance class and storage are sized for a demo, not measured against real load.
+
+**Interview questions**
+1. How does `manage_master_user_password` keep the password out of Terraform state, and what are the alternatives?
+2. What does Multi-AZ give you, and how is it different from a read replica?
+3. Why put a database in a private subnet and allow access by security group instead of by IP range?
+
+## 37. EKS and IRSA
+
+**What it is.** A managed Kubernetes control plane with a small managed node group (default 2 x `t3.medium`; prod 2 to 4 nodes, dev 1 to 2). **IRSA** (IAM Roles for Service Accounts) lets an individual Kubernetes pod get its own AWS permissions: the cluster has an OIDC identity provider, a pod's service account token is exchanged for temporary credentials of a specific IAM role, and the role's trust policy says which service account may assume it. The alternative, giving the node's role broad permissions, would hand every pod on the node the same access.
+
+**Choices.** Kubernetes Secrets are envelope-encrypted with a dedicated rotating KMS key; all five control plane log types go to CloudWatch; nodes require IMDSv2 with a hop limit of 1 (pods cannot reach the node's credentials) and have encrypted disks; the node role carries only the three AWS-managed policies EKS documents. The API endpoint is reachable from the internet but only from CIDRs you list, and the module **rejects `0.0.0.0/0`** by validation.
+
+**Limits (important).** The public endpoint is a convenience: with no VPN or bastion, a private-only endpoint would make the cluster unreachable from a laptop, so checkov's two public-endpoint checks are skipped with that reason. Not included: cluster add-ons, the cluster autoscaler or Karpenter, the AWS Load Balancer Controller, or a pod security baseline. The Kubernetes version default (1.33) must be checked against what EKS supports when you actually apply. Validate cannot prove the node group will register; that depends on networking (NAT) at apply time.
+
+**Interview questions**
+1. What problem does IRSA solve, and how does a pod end up with temporary AWS credentials?
+2. Why is it a risk to give the node IAM role broad permissions?
+3. What are the trade-offs of a public vs private EKS API endpoint?
+
+## 38. Least-privilege IAM
+
+**What it is.** The application's IRSA role can assume only from the `usageline` service account in the `usageline` namespace (the trust policy checks both the token's `sub` and `aud` claims; without `sub`, any service account in the cluster could assume it). Its permission policy lists exact actions on exact resources: send/receive/delete/get-attributes on the one queue, and read on the one database secret. There are no wildcard actions or resources there.
+
+**Where wildcards remain, and why.** There are three, each justified in a comment: a `Deny` on `sqs:*` and another on `s3:*` for non-TLS traffic (a Deny can only remove access), and `kms:*` in each KMS key policy, which is the standard "let IAM decide" statement AWS itself creates (in a key policy `Resource: "*"` means "this key"). Other roles use AWS-managed policies for services that need them (EKS cluster and node roles, RDS enhanced monitoring).
+
+**Limits.** No permission boundaries, no service control policies, and no review of the AWS-managed policies' breadth (they are broad by design). The roles for CI to push images (OIDC federation from GitHub) are not created.
+
+**Interview questions**
+1. What does least privilege mean in practice, and how do you apply it to a role that reads one SQS queue?
+2. Why does an IRSA trust policy need a condition on the `sub` claim?
+3. When is a wildcard action in an IAM policy acceptable, and how do you document it?
+
+## 39. Static analysis: what ran, what it found, and what it cannot prove
+
+**What ran.**
+- `terraform fmt -check -recursive`: passed. `terraform init -backend=false` and `terraform validate` in `bootstrap`, `envs/dev` and `envs/prod`: all valid, locally and in CI.
+- **checkov** (security/policy scanner): the final result is 0 failed checks (248 passed, 19 skipped entries, which are 9 distinct skip reasons repeated per environment) on checkov 3.3.26, and 0 failed on the older 3.3.20 I have locally.
+- **tflint** with the Terraform "recommended" and AWS rulesets: **run in CI only** (no issues reported). It is not installed on this machine: Homebrew no longer carries it and it is not on PyPI, and the only other official route is downloading a release binary, which I did not do without asking you.
+
+**What went wrong, and what it taught.**
+1. **My local result was not the CI result.** CI installed a newer checkov (3.3.26, more checks) than my local one (3.3.20) and failed with 6 findings I had not seen. I reproduced them locally in a throwaway virtualenv with the same version, then fixed the real ones: RDS query logging and TLS enforcement (a parameter group), and explicit KMS key policies. CI now **pins checkov's version**, because an unpinned scanner can turn the build red on its own when it gains checks; upgrading becomes a deliberate change.
+2. **Skips can be dead code.** I removed three skip comments after concluding checkov 3.3.20 never evaluated those checks, then CI's newer version did flag them. They are back as real skips. Lesson: whether a suppression is needed depends on the tool version, so test with the version CI uses.
+3. **A skip can be scoped.** The "no Multi-AZ" and "no deletion protection" skips are placed on the *dev module call*, not inside the module, and checkov reported them only for dev, so prod still enforces those checks.
+4. **The KMS key policy needed `jsonencode`, not a policy document.** Writing it as an `aws_iam_policy_document` made checkov judge it as a general IAM policy (wildcard action, wildcard resource) and fail three IAM checks; as a plain key policy it passes.
+
+**Skips that remain (each has a reason in the code):** no customer-managed key for ECR and CloudWatch log groups; Performance Insights off on the database; EKS public endpoint restricted by CIDR instead of private-only (the two public-endpoint checks); dev-only no Multi-AZ and no deletion protection; state bucket without access logging, cross-region replication or event notifications.
+
+**What none of this proves.** `validate` and the scanners read code; they cannot tell you the IAM policy is sufficient for the app to work, that the AMI/Kubernetes version exists, that names are globally unique (S3 bucket names), that you are within account quotas, or that `apply` will succeed. Only a `plan` against a real account (and an `apply`) answers those, and neither was run.
+
+**Interview questions**
+1. What is the difference between `terraform validate`, `terraform plan` and a security scanner like checkov? What does each catch?
+2. A scanner passes on your laptop but fails in CI. What do you check first, and how do you prevent it?
+3. How do you decide whether to fix a scanner finding or suppress it, and how should a suppression be written?
+
+## 40. CI job and the cost estimate
+
+**CI.** A `terraform` job runs `fmt -check`, `init -backend=false` plus `validate` in the three folders, `tflint` (with the AWS plugin pinned to 0.49.0), and checkov (pinned). It configures no AWS credentials at all, so even a bug in the pipeline cannot touch an account. First run: tflint passed but checkov failed (see 39); after the fixes the job passed.
+
+**Cost.** [COST_ESTIMATE.md](COST_ESTIMATE.md) works through the sizes chosen: roughly $17 a month for the default dev, about $160 for dev with EKS and NAT, and about $245 for prod. It is an **estimate**: the unit prices are my assumptions of approximate list prices, not fetched, and usage-based charges (data transfer, NAT processing, logs) are excluded or guessed. About two thirds of the prod figure is EKS plus NAT, which is why those two are the on/off switches in dev.
+
+**Interview questions**
+1. Why should a validate-only CI job run with no cloud credentials, and what would you add when you want it to run `plan`?
+2. How would you estimate the cost of infrastructure before building it, and how would you check the estimate afterwards?
+3. Which parts of this setup would you remove first to cut cost, and what do you lose by doing so?
