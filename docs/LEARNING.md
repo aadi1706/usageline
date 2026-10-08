@@ -660,7 +660,7 @@ Terraform is "infrastructure as code": you describe cloud resources in `.tf` fil
 
 **What ran.**
 - `terraform fmt -check -recursive`: passed. `terraform init -backend=false` and `terraform validate` in `bootstrap`, `envs/dev` and `envs/prod`: all valid, locally and in CI.
-- **checkov** (security/policy scanner): the final result is 0 failed checks (248 passed, 19 skipped entries, which are 9 distinct skip reasons repeated per environment) on checkov 3.3.26, and 0 failed on the older 3.3.20 I have locally.
+- **checkov** (security/policy scanner): the final result is 0 failed checks (248 passed, 19 skipped entries, which come from 12 distinct skip comments in the code, several counted once per environment) on checkov 3.3.26, and 0 failed on the older 3.3.20 I have locally.
 - **tflint** with the Terraform "recommended" and AWS rulesets: **run in CI only** (no issues reported). It is not installed on this machine: Homebrew no longer carries it and it is not on PyPI, and the only other official route is downloading a release binary, which I did not do without asking you.
 
 **What went wrong, and what it taught.**
