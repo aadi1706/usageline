@@ -823,7 +823,7 @@ CI (continuous integration) checks every change; CD (continuous delivery/deploym
 - **Labels.** `org.opencontainers.image.source` links the package to the repository (which is also how GHCR connects package permissions to the repo) and `revision` records the commit. The digest of the pushed image is written to the job summary.
 - **Concurrency.** Runs on `main` are not cancelled (section 45), so a publish is not interrupted by the next push.
 
-**Limits.** The image is not signed and has no SBOM or provenance attestation (tools such as cosign could add them). A SHA tag in a registry can still be overwritten by someone with write access; the **digest** is the truly immutable reference. A re-run of the same commit rebuilds and re-pushes the same tag, and the rebuilt image can differ slightly. Nothing stops a bad commit reaching `main` except the earlier jobs, because no branch protection or required reviews are configured here. New GHCR packages can start out private, which matters for who can pull them (see the next section for how the rehearsal job pulls it).
+**Limits.** The image is not signed and has no SBOM or provenance attestation (tools such as cosign could add them). A SHA tag in a registry can still be overwritten by someone with write access; the **digest** is the truly immutable reference. A re-run of the same commit rebuilds and re-pushes the same tag, and the rebuilt image can differ slightly. Nothing stops a bad commit reaching `main` except the earlier jobs, because no branch protection or required reviews are configured here. Package visibility is a separate setting from the workflow; see section 50 for what I observed.
 
 **Interview questions**
 1. Why tag images with the commit SHA rather than `latest`, and what is the difference between a tag and a digest?
@@ -869,3 +869,20 @@ CI (continuous integration) checks every change; CD (continuous delivery/deploym
 1. What is the value of rehearsing a deployment against a throwaway cluster, and what can it not tell you?
 2. Why test the image that was actually pushed to the registry instead of rebuilding it in the test job?
 3. The rehearsal job runs after `publish`. What are the trade-offs of that ordering compared with running it before the image is pushed?
+
+## 50. What the first full pipeline run showed (observed)
+
+All seven jobs passed on the first run after the push (lint, test, docker, helm, terraform, publish, deploy-rehearsal). Numbers below are from that run's logs.
+
+- **Trivy (in CI):** 0 CRITICAL and 44 HIGH, none with a fix available, the same as my local run, so the gate passed. The 44 findings are reported but do not block, and `.trivyignore` still ignores nothing.
+- **Publish:** the image was pushed as `ghcr.io/aadi1706/usageline:992c40ee79858103ab611938c812fbb414c8fbdc` with digest `sha256:483a0131...f42b85`. An anonymous request for its manifest returned HTTP 200, so the package is publicly pullable (it is linked to this public repository through the `org.opencontainers.image.source` label). I did not check how this depends on account settings.
+- **Rehearsal:** the atomic install of the published image took 24 s (release revision 1) and the smoke test passed (health, ready, create plan and tenant, record usage, generate and read an invoice: 150 units, 1250 cents). The deliberately broken upgrade (`--atomic --timeout 90s`, readiness path `/does-not-exist`) failed with "Deployment ... not ready ... Updated: 1/2" and was rolled back; `helm` returned after **96 s** (the 90 s timeout plus the rollback), and the release history showed "Rollback to 1". During that window 192 of 192 probes of `/ready` returned 200. After the rollback the live image and readiness path were the original ones and the smoke test passed again.
+- **Warnings:** the Node 20 deprecation notices from earlier runs are gone (no mention of Node 20 anywhere in the log). The only deprecation messages left are Helm 4 saying `--atomic` is now called `--rollback-on-failure` (the script keeps the name you asked for) and a pytest/Starlette notice about `httpx`.
+- **Local vs CI differences:** locally the install was 79 s on a cold cluster against 24 s in CI; times depend heavily on the machine and on what is already cached, so none of these timings is a benchmark.
+
+**What I did not verify.** The first local trial of the whole pipeline was done on a temporary kind cluster; `scripts/kind-bootstrap.sh` was edited to call the shared metrics-server script and I did not re-run it end to end (the shared script itself ran in both the local rehearsal and CI). I did not test what happens when the gate actually fails in CI (I tested that locally with a tightened gate), and I did not run the pipeline on a pull request, where `publish` and the rehearsal are skipped by design.
+
+**Interview questions**
+1. The rollback test passed with 192 of 192 probes OK. What would make you doubt that as proof of "no downtime", and what would you measure instead?
+2. A teammate wants the rehearsal to block publishing. How would you restructure the jobs, and what would you give up?
+3. Which parts of this pipeline would you have to change to deploy for real to a cloud cluster, and which would stay the same?
