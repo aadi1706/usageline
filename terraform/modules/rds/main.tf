@@ -57,6 +57,35 @@ resource "aws_iam_role_policy_attachment" "monitoring" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
 }
 
+# TLS-only connections, plus logging of schema changes and any statement slower than 1 second (not every query, to keep log volume and cost low).
+resource "aws_db_parameter_group" "this" {
+  name_prefix = "${var.name}-"
+  family      = "postgres${var.engine_version}"
+  description = "TLS-only connections and query logging for ${var.name}"
+
+  # Reject connections that do not use TLS (this is also the default on PostgreSQL 15+, but stated explicitly).
+  parameter {
+    name  = "rds.force_ssl"
+    value = "1"
+  }
+
+  parameter {
+    name  = "log_statement"
+    value = "ddl"
+  }
+
+  parameter {
+    name  = "log_min_duration_statement"
+    value = "1000"
+  }
+
+  tags = var.tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 resource "aws_db_instance" "this" {
   identifier     = var.name
   engine         = "postgres"
@@ -76,6 +105,7 @@ resource "aws_db_instance" "this" {
   storage_encrypted     = true
   kms_key_id            = var.kms_key_id
 
+  parameter_group_name   = aws_db_parameter_group.this.name
   db_subnet_group_name   = aws_db_subnet_group.this.name
   vpc_security_group_ids = [aws_security_group.this.id]
   publicly_accessible    = false
