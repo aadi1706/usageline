@@ -734,3 +734,22 @@ Phase 5a described AWS infrastructure that was only validated. This phase uses T
 1. When would you use `terraform import` instead of recreating a resource, and what problems does importing a Helm release have?
 2. How do you decide which steps belong in Terraform and which in a script?
 3. A teammate runs `terraform apply` on a fresh machine and the pods are in `ImagePullBackOff`. What are the likely causes in this setup?
+
+## 43. Applying for real, and a drift demonstration (observed)
+
+All of this ran against the local kind cluster only; the AWS folders were not touched.
+
+**First apply.** `terraform plan` showed `5 to add, 0 to change, 0 to destroy`: the cluster guard, the two namespaces and the two Helm releases. `terraform apply` of that saved plan took about 7 minutes in total (the monitoring stack 4m57s, the usageline chart 2m16s, most of which is waiting for pods and the migration hook Job). Afterwards: 2 API pods, Postgres and all 5 monitoring pods were `Running`; `helm list` showed `kps` and `usageline` as `deployed`; `curl localhost:8081/health` returned `{"status":"ok"}` and `/ready` returned `{"status":"ready"}` (both HTTP 200); the HPA reported `cpu: <unknown>` for the first seconds (metrics not yet collected) and `9%/70%` shortly after. A plan with no code change then reported "No changes".
+
+**Changing one value in code.** I changed the default of `hpa_max_replicas` from 5 to 4. The plan was `0 to add, 1 to change, 0 to destroy`: only `helm_release.usageline`, updated in place, and the only real input difference was `set` value `hpa.maxReplicas: "5" -> "4"`. The other `~` lines in that plan are the provider marking computed release metadata (revision, timestamps, rendered values) as "known after apply"; they are noise, not extra changes. The monitoring release and namespaces were not in the plan. Applying took 6 seconds: the live HPA became `max=4`, `helm list` showed `usageline` at revision 2, the API pods were not restarted (same pod names and ages, since nothing in the Deployment changed), and `/health` and `/ready` still returned 200. A plan afterwards said "No changes".
+
+**What Terraform does NOT see (observed).** To test real drift I patched the HPA by hand with `kubectl` (max 4 to 3) and ran `plan` again: it still said "No changes". `helm_release` compares the values you give it with what it saved in state; it does not read the live Kubernetes objects, so an out-of-band edit is invisible until the chart's inputs change (and even then Helm only re-renders from the chart). I restored the live value to 4 afterwards. This differs from most AWS resources, where a refresh reads the real object and plan shows the difference.
+
+**Why this still beats applying by hand.** The change was reviewed as a code diff, the plan showed exactly what would change before anything happened, and the saved plan guaranteed that `apply` did exactly that. The cost was a heavier tool for a one-line change.
+
+**Limits.** "Drift" in the Helm sense is only detected for inputs. To get real drift detection for Kubernetes objects you would manage them directly with the `kubernetes` provider (resource-by-resource), use `helm diff`, or run a GitOps controller that continuously reconciles. Saved plans can go stale if anything changes between plan and apply (Terraform refuses to apply a plan if state changed underneath it).
+
+**Interview questions**
+1. What does it mean for Terraform to detect drift, and why did it not notice the manual `kubectl patch`?
+2. Why save a plan with `-out` and apply that file instead of running `apply` directly?
+3. The plan showed many `known after apply` lines for a one-value change. How do you tell real changes from provider noise?

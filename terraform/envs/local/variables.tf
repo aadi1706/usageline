@@ -17,7 +17,7 @@ variable "image_tag" {
 variable "hpa_max_replicas" {
   description = "Upper bound for the API's HorizontalPodAutoscaler."
   type        = number
-  default     = 5
+  default     = 4
 
   validation {
     condition     = var.hpa_max_replicas >= 2
