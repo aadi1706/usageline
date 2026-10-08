@@ -829,3 +829,24 @@ CI (continuous integration) checks every change; CD (continuous delivery/deploym
 1. Why tag images with the commit SHA rather than `latest`, and what is the difference between a tag and a digest?
 2. Why scan the image before pushing it instead of after?
 3. What does `GITHUB_TOKEN` give you compared with a personal access token, and why restrict `packages: write` to one job?
+
+## 48. Smoke test and the atomic-rollback rehearsal (scripts, tested locally first)
+
+**What they are.** `scripts/smoke-test.sh` checks `/health` and `/ready`, then runs the real business flow: create a plan, a tenant, record 150 usage units, generate an invoice, read it back, and assert the arithmetic (150 units - 100 included = 50 billable x 5 cents + 1000 base = 1250). `scripts/deploy-rehearsal.sh` installs the chart with `helm upgrade --install --atomic --timeout 5m`, runs the smoke test, then performs a **deliberately broken upgrade** and checks that Helm rolls it back and the previous version keeps serving. Both are plain scripts rather than YAML so I could run them against a throwaway local kind cluster before CI ever saw them.
+
+**What `--atomic` does.** Helm waits for the release's resources to become ready; if that does not happen within `--timeout`, an atomic upgrade rolls the release back to the previous revision automatically. (Helm 4 renamed the flag to `--rollback-on-failure`; `--atomic` still works there as a deprecated alias that prints a warning, which is what the scripts use.)
+
+**The break I chose, and why.** A readiness probe on a path that does not exist (`--set probes.readiness.path=/does-not-exist`). The new pods start but never become Ready, so the rolling update stalls and Helm must decide. I deliberately did **not** use a nonexistent image tag: the chart runs database migrations as a `pre-upgrade` hook Job from the same image, so a bad tag would fail at that hook before the Deployment is ever touched, which proves much less than a rollout that starts and then fails.
+
+**Local results (temporary kind cluster, locally built image; this is not the CI run).** The atomic install passed and the smoke test passed. The broken upgrade failed with Helm reporting the Deployment "not ready ... Updated: 1/2 ... context deadline exceeded", and Helm rolled back ("Rollback to 1"). With `--timeout 90s` the command returned after **96 s** (90 s of waiting plus about 6 s for the rollback); with a 45 s timeout it returned after 52 s. A probe of `/ready` every 0.5 s during the broken upgrade got HTTP 200 in all 184 attempts (and 101 of 101 in the second run); afterwards the live Deployment had the original image and the `/ready` probe path again, and the smoke test passed a second time.
+
+**What the time means.** Helm does not detect that the new pods are bad quickly: it waits out the whole timeout, so the time to failure is about the timeout you set, plus the rollback. Your timeout is therefore the length of a failed deploy. A shorter one (90 s here, 5 m for the good deploy) bounds how long a bad release sits half-rolled-out.
+
+**Why the old pods kept serving.** The default rolling-update settings (`maxUnavailable` 25% of 2 pods rounds down to 0, `maxSurge` 1) add one new pod before removing any old one. Since the new pod never became Ready, no old pod was ever removed, and Services only route to Ready pods. Without that, a bad release could take down the working one.
+
+**Limits.** The probe measures one URL through one path on a kind cluster, not real traffic. The test needs the schema to be compatible between versions; a migration that already ran in the broken release is not undone by a Helm rollback (the bad release here had no migration). Rollback restores the previous *configuration*, not data.
+
+**Interview questions**
+1. What does `helm upgrade --atomic` do on failure, and how long does it take to notice a bad release? What controls that?
+2. Why does a failing rolling update not cause downtime, and what Deployment settings make that true?
+3. Why was a nonexistent image tag a weaker test of rollback than a failing readiness probe in this chart?

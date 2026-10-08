@@ -6,7 +6,6 @@ exec 3>&1 1>&2
 
 CLUSTER=usageline
 CONTEXT="kind-${CLUSTER}"
-METRICS_SERVER_VERSION=v0.9.0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 for tool in docker kind kubectl; do
@@ -29,16 +28,8 @@ docker tag "$IMAGE_ID" "usageline:${TAG}"
 echo "==> loading usageline:${TAG} into kind"
 kind load docker-image "usageline:${TAG}" --name "$CLUSTER"
 
-echo "==> installing metrics-server ${METRICS_SERVER_VERSION}"
-kubectl --context "$CONTEXT" apply -f \
-  "https://github.com/kubernetes-sigs/metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml"
-# kind's kubelet serves a self-signed certificate, so metrics-server must skip TLS verification.
-if ! kubectl --context "$CONTEXT" -n kube-system get deploy metrics-server \
-  -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q kubelet-insecure-tls; then
-  kubectl --context "$CONTEXT" -n kube-system patch deployment metrics-server --type=json \
-    -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
-fi
-kubectl --context "$CONTEXT" -n kube-system rollout status deployment/metrics-server --timeout=120s
+echo "==> installing metrics-server"
+"$ROOT/scripts/install-metrics-server.sh" "$CONTEXT"
 
 echo "==> bootstrap done. Image tag: ${TAG}  (terraform: -var image_tag=${TAG})"
 echo "$TAG" >&3
