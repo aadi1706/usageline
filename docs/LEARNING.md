@@ -768,3 +768,26 @@ All of this ran against the local kind cluster only; the AWS folders were not to
 1. What is the difference between what `terraform validate` proves and what a successful `plan` proves?
 2. Why is it useful to commit the dependency lock file with hashes for more than one platform?
 3. How would you test a Terraform configuration that manages a Kubernetes cluster in CI without touching a real cluster?
+
+---
+
+# Phase 6: CI/CD (no cloud credentials, no paid services)
+
+CI (continuous integration) checks every change; CD (continuous delivery/deployment) is the automated path that builds, publishes and deploys it. Everything here uses only GitHub's free runners, the free GitHub Container Registry (GHCR) and a throwaway kind cluster inside the runner; no cloud account is involved.
+
+## 45. Hardening the workflow before adding delivery
+
+**What changed.** Every `uses:` line is now pinned to a full commit SHA with the human-readable version in a trailing comment (for example `actions/checkout@3d3c42e... # v7.0.1`). Every job runs on `ubuntu-24.04` instead of `ubuntu-latest`. The actions were bumped to releases that run on Node 24 (I checked each action's `runs.using`; the earlier runs had shown a warning that Node 20 actions were being forced to Node 24). A `dependabot.yml` for the `github-actions` ecosystem keeps the pins current. The workflow-level `permissions: contents read` stays as the default; later jobs raise it only where needed.
+
+**Why SHAs, not tags.** A tag such as `@v4` is a pointer the action's owner (or an attacker who compromises their account) can move to different code, and your next run would execute it, with whatever secrets and token permissions the job has. A commit SHA is immutable. That matters most for a job that can push images. The cost is readability and upkeep, which the version comment and Dependabot address.
+
+**Why pin the runner.** `ubuntu-latest` silently changes under you; the earlier runs carried a notice that it moves to a new Ubuntu release on 2026-10-19. With `ubuntu-24.04` the change happens when I edit the file, not on a date I did not choose.
+
+**Concurrency change.** The workflow used to cancel an older run whenever a newer push arrived. On `main` that could kill a publish halfway, so cancellation now applies only to non-`main` refs.
+
+**Limits.** The major versions jumped (checkout v4 to v7, setup-python v5 to v7, setup-terraform v3 to v4, setup-tflint v4 to v6), so behaviour could differ; CI is what tells me. A pinned SHA protects the action's own code but not what that action downloads at run time (for example it fetches a Terraform or tflint binary). Dependabot only proposes updates; someone has to review them.
+
+**Interview questions**
+1. Why is pinning a GitHub Action to a commit SHA safer than pinning to a version tag, and what does it cost you?
+2. What can a compromised third-party action do in a job, and how do job-level `permissions` limit the damage?
+3. Why would you pin `runs-on` to a specific runner image instead of `ubuntu-latest`?
