@@ -55,6 +55,22 @@ k6 run loadtest/k6.js        # ramping load against localhost:8081
 
 The API exposes Prometheus metrics at `/metrics`. Alert meanings and what to do about them are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
+## Load test
+
+![Grafana dashboard during the load test: request rate, error rate, p95 latency and pod count](docs/images/grafana-load-1.png)
+![Grafana dashboard during the load test: CPU usage vs requests, limits and the HPA target](docs/images/grafana-load-2.png)
+
+*Load test on a local kind cluster: request rate climbs to ~440 req/s and the HPA scales the API from 2 to 5 pods. Single run, laptop-hosted, k6 on the same machine.*
+
+Error panel shows no data because no 5xx responses occurred.
+
+k6 results (`loadtest/k6.js`):
+
+- 64,183 requests
+- ~267 req/s average
+- p95 96 ms
+- 0.00% failed requests
+
 ## Run the tests
 
 ```bash
