@@ -1,10 +1,24 @@
 data "aws_partition" "current" {}
+data "aws_caller_identity" "current" {}
 
 # ---- Envelope encryption key for Kubernetes Secrets ----
 
+# Standard "delegate to IAM" key policy: the account root may administer the key, and IAM policies (such as the
+# cluster role's) then decide who can use it. "kms:*" on "*" is the documented default; in a key policy "*"
+# means "this key".
 resource "aws_kms_key" "secrets" {
   description         = "Envelope encryption of Kubernetes Secrets for ${var.name}"
   enable_key_rotation = true
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "EnableIamPolicies"
+      Effect    = "Allow"
+      Principal = { AWS = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root" }
+      Action    = "kms:*"
+      Resource  = "*"
+    }]
+  })
 
   tags = var.tags
 }

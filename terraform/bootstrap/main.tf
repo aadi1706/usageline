@@ -1,6 +1,20 @@
+data "aws_caller_identity" "current" {}
+
+# Standard "delegate to IAM" key policy: the account root may administer the key, and IAM policies then decide
+# who can use it. "kms:*" on "*" is the documented default key policy, and in a key policy "*" means "this key".
 resource "aws_kms_key" "state" {
   description         = "Encrypts Terraform state in ${var.state_bucket_name}"
   enable_key_rotation = true
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "EnableIamPolicies"
+      Effect    = "Allow"
+      Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+      Action    = "kms:*"
+      Resource  = "*"
+    }]
+  })
 }
 
 resource "aws_kms_alias" "state" {
@@ -10,10 +24,9 @@ resource "aws_kms_alias" "state" {
 
 resource "aws_s3_bucket" "state" {
   bucket = var.state_bucket_name
-  # Not configured on purpose (and not flagged by checkov in this version):
-  #  - access logging: needs a second bucket that would itself need logging; add CloudTrail data events if auditing is required.
-  #  - cross-region replication: doubles storage and adds a second region to secure; versioning already protects against bad writes.
-  #  - event notifications: nothing consumes events for state objects.
+  # checkov:skip=CKV_AWS_18:Access logging needs a second bucket that would itself need logging; add CloudTrail data events if auditing is required.
+  # checkov:skip=CKV_AWS_144:Cross-region replication doubles storage and adds a second region to secure; versioning already protects against bad writes. Revisit if regional loss is unacceptable.
+  # checkov:skip=CKV2_AWS_62:Nothing consumes event notifications for state objects.
 
   # State is irreplaceable: refuse to delete a bucket that still contains objects.
   force_destroy = false
