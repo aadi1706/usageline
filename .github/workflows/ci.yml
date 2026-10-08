@@ -88,3 +88,35 @@ jobs:
           helm repo update
           helm template kps prometheus-community/kube-prometheus-stack --version 92.1.0 \
             --namespace monitoring -f monitoring/values.yaml > /dev/null
+
+  terraform:
+    runs-on: ubuntu-latest
+    # No AWS credentials are configured anywhere in this job: it only formats, validates and statically analyses.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Format check
+        run: terraform fmt -check -recursive terraform
+      - name: Validate (no backend, no credentials)
+        run: |
+          for dir in terraform/bootstrap terraform/envs/dev terraform/envs/prod; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+      - uses: terraform-linters/setup-tflint@v4
+      - name: tflint
+        working-directory: terraform
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init
+          tflint --recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: checkov
+        run: |
+          pip install checkov
+          checkov -d terraform --framework terraform --compact --quiet
