@@ -810,3 +810,22 @@ CI (continuous integration) checks every change; CD (continuous delivery/deploym
 1. Why does the gate fail only on CRITICAL vulnerabilities that have a fix, and what are the risks of that policy?
 2. What is the difference between scanning an image and scanning the application's source dependencies?
 3. A scan passes today and fails tomorrow on the same image. Why can that happen, and how would you handle it?
+
+## 47. The publish job: build, scan, then push
+
+**What it is.** A `publish` job builds the image, scans it with Trivy (section 46), logs in to GHCR with the built-in `GITHUB_TOKEN`, and pushes `ghcr.io/aadi1706/usageline:<commit SHA>`. GHCR is GitHub's container registry; it is free for this use and needs no extra account or stored secret.
+
+**Decisions.**
+- **Only on pushes to `main`, and only after the other five jobs succeed** (`if:` on the event and ref, plus `needs: [lint, test, docker, helm, terraform]`). Pull requests build and test but never publish, so an unreviewed change can never produce a registry image.
+- **Scan before push.** The image is built into the runner's local Docker daemon first (`load: true`, `push: false`), scanned, and pushed only if the gate passes. A vulnerable image therefore never reaches the registry, instead of being published and then flagged afterwards.
+- **Tagged with the commit SHA, not `latest`.** A SHA tag says exactly which code is in the image, can be traced back to a commit, and is what a deployment or rollback should reference. `latest` is a moving label that tells you nothing about what is running.
+- **Minimal permissions.** The workflow default is read-only; only this job has `packages: write`. It authenticates with the per-run `GITHUB_TOKEN`, which expires when the run ends, so there is no long-lived credential to leak.
+- **Labels.** `org.opencontainers.image.source` links the package to the repository (which is also how GHCR connects package permissions to the repo) and `revision` records the commit. The digest of the pushed image is written to the job summary.
+- **Concurrency.** Runs on `main` are not cancelled (section 45), so a publish is not interrupted by the next push.
+
+**Limits.** The image is not signed and has no SBOM or provenance attestation (tools such as cosign could add them). A SHA tag in a registry can still be overwritten by someone with write access; the **digest** is the truly immutable reference. A re-run of the same commit rebuilds and re-pushes the same tag, and the rebuilt image can differ slightly. Nothing stops a bad commit reaching `main` except the earlier jobs, because no branch protection or required reviews are configured here. New GHCR packages can start out private, which matters for who can pull them (see the next section for how the rehearsal job pulls it).
+
+**Interview questions**
+1. Why tag images with the commit SHA rather than `latest`, and what is the difference between a tag and a digest?
+2. Why scan the image before pushing it instead of after?
+3. What does `GITHUB_TOKEN` give you compared with a personal access token, and why restrict `packages: write` to one job?
