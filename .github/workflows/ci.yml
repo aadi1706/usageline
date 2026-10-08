@@ -118,5 +118,5 @@ jobs:
           python-version: "3.12"
       - name: checkov
         run: |
-          pip install checkov
+          pip install "checkov==3.3.26"  # pinned: new checkov releases add checks, so bump deliberately
           checkov -d terraform --framework terraform --compact --quiet
