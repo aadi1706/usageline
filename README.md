@@ -71,6 +71,14 @@ k6 results (`loadtest/k6.js`):
 - p95 96 ms
 - 0.00% failed requests
 
+## Infrastructure (Terraform, AWS)
+
+`terraform/` defines a VPC, ECR, SQS (with a dead-letter queue), RDS PostgreSQL, EKS (with IRSA) and least-privilege IAM as modules, composed by `envs/dev` and `envs/prod`, with remote state in S3 (`terraform/bootstrap` creates the bucket). It is **validate-only**: it has been formatted, validated and statically analysed (`terraform fmt`, `validate`, `tflint`, `checkov` in CI, no AWS credentials), but never planned or applied. Estimated monthly cost is in [docs/COST_ESTIMATE.md](docs/COST_ESTIMATE.md).
+
+```bash
+cd terraform/envs/dev && terraform init -backend=false && terraform validate
+```
+
 ## Run the tests
 
 ```bash
