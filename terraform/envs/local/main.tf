@@ -6,7 +6,7 @@ resource "terraform_data" "cluster_guard" {
   lifecycle {
     precondition {
       condition = length(data.kubernetes_nodes.this.nodes) > 0 && alltrue([
-        for node in data.kubernetes_nodes.this.nodes : startswith(node.metadata.name, "usageline-")
+        for node in data.kubernetes_nodes.this.nodes : startswith(node.metadata[0].name, "usageline-")
       ])
       error_message = "Connected cluster does not look like the kind cluster 'usageline' (node names must start with 'usageline-'). Refusing to continue."
     }
