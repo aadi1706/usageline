@@ -688,3 +688,30 @@ Terraform is "infrastructure as code": you describe cloud resources in `.tf` fil
 1. Why should a validate-only CI job run with no cloud credentials, and what would you add when you want it to run `plan`?
 2. How would you estimate the cost of infrastructure before building it, and how would you check the estimate afterwards?
 3. Which parts of this setup would you remove first to cut cost, and what do you lose by doing so?
+
+---
+
+# Phase 5b: Terraform on the local kind cluster
+
+Phase 5a described AWS infrastructure that was only validated. This phase uses Terraform for something that can be *applied for real and for free*: the Helm releases on the local kind cluster. `terraform/envs/local` uses the `helm` and `kubernetes` providers instead of AWS.
+
+## 41. A Terraform environment pointed at one cluster only
+
+**What it is.** `terraform/envs/local` declares the two namespaces (`kubernetes` provider) and two Helm releases (`helm` provider): `kube-prometheus-stack` installed from the community repository with a pinned chart version and `monitoring/values.yaml`, and the `usageline` chart from this repo with `monitoring/usageline-values.yaml`, an image tag, and the HPA maximum as inputs. The usageline release `depends_on` the monitoring one, because the Prometheus Operator's CRDs must exist before the chart's `ServiceMonitor` and `PrometheusRule` objects can be created.
+
+**Making it unable to touch another cluster.** Two layers:
+1. Both providers set `config_context = "kind-usageline"` as a **literal**, not a variable. If that context does not exist in the kubeconfig, the providers fail; they never fall back to whichever context happens to be current (the usual way an `apply` lands on the wrong cluster).
+2. A `precondition` on a `terraform_data` resource reads the cluster's nodes and fails unless every node name starts with `usageline-`, which is how kind names the nodes of this cluster. Namespaces depend on it, so nothing is created if the check fails. It guards against a context that has the right name but points somewhere else.
+
+**Other choices.**
+- **State is local** (`terraform.tfstate`, git-ignored before the first `init`), because this manages a throwaway local cluster. State here can contain rendered chart values, so it must never be committed. This is the opposite choice from the AWS environments, which use a remote, locked, encrypted bucket.
+- **Provider versions are pinned** with `~>` constraints and exact versions plus hashes in the committed `.terraform.lock.hcl` (Linux and macOS), so CI and laptops use identical providers.
+- **Terraform does not build the image, create the cluster, or install metrics-server.** Those stay in `scripts/` because they are imperative steps (docker build, `kind load`) that Terraform does not model well. The image tag is passed in as a variable. This split is a real limit: "terraform apply" alone cannot bring up the whole stack from nothing.
+- The namespaces are created by the `kubernetes` provider rather than by `create_namespace` on the Helm release, so Terraform, not a Helm side effect, owns them and can show them in a plan.
+
+**Limits.** The `helm_release` resource only notices changes to its inputs (chart version, values, set values); editing a template inside the local chart directory without changing the chart's `version` is not a change Terraform can see. The Helm hooks in our chart (the migration Job, the dev Postgres created as a pre-install hook) are not tracked as release resources, so Terraform does not know about them. The precondition checks node names, not the cluster's identity cryptographically.
+
+**Interview questions**
+1. What are the ways a `terraform apply` can end up on the wrong cluster, and how does hard-coding the provider context and adding a precondition address them?
+2. Why does the usageline release need `depends_on` on the monitoring release when there is no attribute reference between them?
+3. When is local state acceptable, and what do you lose compared with a remote locked backend?
