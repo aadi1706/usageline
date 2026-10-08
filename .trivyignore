@@ -1,0 +1,8 @@
+# Vulnerabilities Trivy must not report, one ID per line, each with a reason.
+# Policy: the CI gate already ignores findings that have no fix yet, so they are reported in the job summary
+# but do not need an entry here. Add an entry only for a finding that has a fix available and that we have
+# analysed and decided not to act on, and always say why and when to review it, for example:
+#
+#   CVE-2099-00000   # not reachable: we never call the affected function; review 2027-01-01
+#
+# Currently nothing is ignored.

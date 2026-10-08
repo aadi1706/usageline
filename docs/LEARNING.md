@@ -791,3 +791,22 @@ CI (continuous integration) checks every change; CD (continuous delivery/deploym
 1. Why is pinning a GitHub Action to a commit SHA safer than pinning to a version tag, and what does it cost you?
 2. What can a compromised third-party action do in a job, and how do job-level `permissions` limit the damage?
 3. Why would you pin `runs-on` to a specific runner image instead of `ubuntu-latest`?
+
+## 46. Scanning the image with Trivy
+
+**What it is.** Trivy reads a container image, lists the operating-system packages and Python libraries inside it, and matches them against a database of known vulnerabilities (CVEs). `scripts/trivy-scan.sh <image>` does two things: it **reports** the CRITICAL and HIGH counts (total, with a fix available, and with no fix yet) as a table in the job summary, and it applies a **gate**: the script exits non-zero only if a CRITICAL vulnerability **with a fix available** exists. HIGH findings never fail the build.
+
+**Real result (local run, Trivy 0.75.0, image built from the current code, Debian 13.7 base).** 0 CRITICAL and 44 HIGH. All 44 HIGH findings are in operating-system packages of the `python:3.12-slim` base image (util-linux and its libraries, ncurses, systemd libraries, perl-base), and **none has a fix available** (the Debian status is "affected" or "fix deferred"). None are in our Python dependencies. So the gate passes today, and there was nothing to ignore. These numbers will change from day to day because the vulnerability database is updated continuously; CI will report its own counts.
+
+**Why gate only on "fixable CRITICAL".** A gate that fails on anything without a fix would block every build until a distribution ships a patch that we cannot influence, so people learn to ignore or disable it. Failing only when an update exists makes the failure actionable: bump the base image, rebuild. Findings without a fix stay visible in the summary so they are not forgotten.
+
+**How I tested the gate (rather than assuming it works).** Default settings on the real image: exit 0. With the gate deliberately tightened (`TRIVY_GATE_SEVERITY=HIGH TRIVY_GATE_IGNORE_UNFIXED=false`) the same image fails with exit 1 and prints the findings. The "fix available" table is produced by a separate small script (`scripts/trivy_summary.py`); I checked it with a synthetic report containing one fixable CRITICAL. I found and fixed a bug on the way: the script exited 1 even when the gate passed, because its last command was `[ -n "$VAR" ] && ...`, which returns 1 when the variable is unset.
+
+**`.trivyignore`.** It exists, with the policy written in it, and currently ignores nothing. Anything added must carry a reason and a review date.
+
+**Limits.** Trivy only knows vulnerabilities in its database at scan time (a CVE published tomorrow is not caught today), and it scans the image's packages, not our application logic. "Fix available" depends on the distribution's data. The scan runs in CI before the image is pushed (next section) but not on a schedule, so an image already published can become vulnerable without anything alerting us.
+
+**Interview questions**
+1. Why does the gate fail only on CRITICAL vulnerabilities that have a fix, and what are the risks of that policy?
+2. What is the difference between scanning an image and scanning the application's source dependencies?
+3. A scan passes today and fails tomorrow on the same image. Why can that happen, and how would you handle it?
